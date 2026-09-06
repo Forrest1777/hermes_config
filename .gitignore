@@ -1,99 +1,169 @@
-# ============================================================================
-# Hermes environment snapshot repository
-# Goal: version only static configuration/behavior files useful for inspection.
-# Strategy: deny everything at the repository root, then explicitly allow the
-# static parts that define Hermes behavior.
-# ============================================================================
+# =============================================================================
+# Hermes environment repository
+# Repository root: E:\dev\ai_agents\hermes
+#
+# Purpose:
+#   Version only static files that explain/configure the Hermes environment.
+#   Exclude runtime state, logs, databases, caches, workspaces, backups and
+#   duplicated/generated copies.
+#
+# All paths below are RELATIVE to the repository root.
+# =============================================================================
 
-# ---------------------------------------------------------------------------
-# DENY BY DEFAULT
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# DENY EVERYTHING AT ROOT BY DEFAULT
+# -----------------------------------------------------------------------------
 /*
 
 # Repository metadata/docs
 !/.gitignore
+!/.gitattributes
 !/README.md
 !/AGENTS.md
 !/LICENSE
 
-# Core Hermes static configuration
-!/SOUL.md
-!/config.yaml
-!/gitconfig
+# -----------------------------------------------------------------------------
+# TOP-LEVEL LEGACY / MAINTENANCE SCRIPTS
+# -----------------------------------------------------------------------------
+!/backup-hermes.bat
+!/backup-kanban.bat
+!/restore-kanban.bat
 
-# Optional sanitized environment templates only
-!/.env.example
-
-# Docker/Compose configuration, if this repository root also contains it
-!/docker-compose.yml
-!/compose.yaml
-!/compose.yml
+# -----------------------------------------------------------------------------
+# COMPOSE
+# Keep Docker/Compose configuration and related static helper files.
+# Secrets such as .env are re-ignored later.
+# -----------------------------------------------------------------------------
 !/compose/
-!/compose/docker-compose.yml
-!/compose/compose.yaml
-!/compose/compose.yml
-!/compose/.env.example
+!/compose/**
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# TOOLs
+# Operational/audit scripts maintained by the user.
+# Generated logs, archives, DBs and caches are re-ignored later.
+# -----------------------------------------------------------------------------
+!/TOOLs/
+!/TOOLs/**
+
+# -----------------------------------------------------------------------------
+# HERMES DATA
+# -----------------------------------------------------------------------------
+!/hermes-data/
+
+# Deny every direct child first, then explicitly reopen useful static content.
+/hermes-data/*
+
+# Core behavior/configuration
+!/hermes-data/SOUL.md
+!/hermes-data/config.yaml
+!/hermes-data/gitconfig
+!/hermes-data/.env.example
+
+# -----------------------------------------------------------------------------
 # PROFILES
-# Keep only behavior/configuration plus profile-specific skills/scripts/policy.
-# Everything else inside each profile is runtime state by default.
-# ---------------------------------------------------------------------------
-!/profiles/
-/profiles/*/*
+#
+# Keep profile behavior/configuration, but NOT duplicated skill contents.
+# skills/.bundled_manifest is retained to preserve which bundle/version was
+# installed for each profile without storing hundreds of copied skill files.
+# -----------------------------------------------------------------------------
+!/hermes-data/profiles/
 
-# Core profile definition
-!/profiles/*/SOUL.md
-!/profiles/*/config.yaml
-!/profiles/*/profile.yaml
-!/profiles/*/.env.example
+# Ignore all immediate profile entries first.
+/hermes-data/profiles/*
 
-# Profile-specific skills: relevant to actual agent behavior
-!/profiles/*/skills/
-!/profiles/*/skills/**
+# Re-open profile directories only (not extracted duplicate files sitting
+# directly under profiles/).
+!/hermes-data/profiles/*/
 
-# Orchestrator operational scripts
-!/profiles/implementation-orchestrator/scripts/
-!/profiles/implementation-orchestrator/scripts/**
+# Ignore everything inside each profile by default.
+/hermes-data/profiles/*/**
 
-# Execution Governor: keep only active policy, not cases/events/state
-!/profiles/execution-governor/governance/
-/profiles/execution-governor/governance/*
-!/profiles/execution-governor/governance/policy.yaml
+# Canonical profile definition
+!/hermes-data/profiles/*/SOUL.md
+!/hermes-data/profiles/*/config.yaml
+!/hermes-data/profiles/*/profile.yaml
+!/hermes-data/profiles/*/.env.example
 
-# ---------------------------------------------------------------------------
-# SHARED SKILLS
-# Static instructions/code used by Hermes agents
-# ---------------------------------------------------------------------------
-!/skills/
-!/skills/**
+# Preserve installed skill bundle identity per profile, but not the copies.
+!/hermes-data/profiles/*/skills/
+!/hermes-data/profiles/*/skills/.bundled_manifest
 
-# ---------------------------------------------------------------------------
-# PLUGINS
-# Plugin code/manifests/tests define operational behavior
-# ---------------------------------------------------------------------------
-!/plugins/
-!/plugins/**
+# Profile-specific operational scripts are static behavior.
+!/hermes-data/profiles/*/scripts/
+!/hermes-data/profiles/*/scripts/**
 
-# ---------------------------------------------------------------------------
-# OPERATIONAL SCRIPTS
-# ---------------------------------------------------------------------------
-!/scripts/
-!/scripts/**
+# Execution Governor: only active static policy.
+!/hermes-data/profiles/execution-governor/governance/
+!/hermes-data/profiles/execution-governor/governance/policy.yaml
 
-# ---------------------------------------------------------------------------
-# OPERATIONAL HARDENING
-# Small static patchers, templates, manifests and documentation useful for
-# diagnosing how this Hermes environment was hardened.
-# ---------------------------------------------------------------------------
-!/operational-hardening/
-!/operational-hardening/**
+# Maintenance scripts stored directly in profiles/
+!/hermes-data/profiles/EXTRACT_PROFILE.bat
+!/hermes-data/profiles/IMPORT_PROFILE.bat
 
-# ============================================================================
-# RE-IGNORE GENERATED / RUNTIME / SECRET CONTENT INSIDE ALLOWED TREES
-# ============================================================================
+# -----------------------------------------------------------------------------
+# CANONICAL ROOT SKILLS
+#
+# Keep only the behavior contract (SKILL.md) for generic skills.
+# Do not store duplicated profile copies, references, examples or helper code
+# unless explicitly whitelisted below.
+# -----------------------------------------------------------------------------
+!/hermes-data/skills/
 
-# Secrets / credentials
+# Ignore all skill content first.
+/hermes-data/skills/**
+
+# Re-open directories so selected files can be included.
+!/hermes-data/skills/**/
+
+# Main skill behavior definition.
+!/hermes-data/skills/**/SKILL.md
+
+# Installed bundle inventory/version metadata.
+!/hermes-data/skills/.bundled_manifest
+
+# Selected operational skills whose implementation materially affects this
+# Hermes workflow. Keep these complete.
+!/hermes-data/skills/caveman-caveman-compress/**
+!/hermes-data/skills/worktree-preflight/**
+
+# -----------------------------------------------------------------------------
+# CENTRALIZED PLUGINS
+#
+# This is the canonical plugin location for this environment.
+# Keep plugin source/manifests/tests/docs; generated Python caches are ignored.
+# Do not keep plugin copies from profiles or dependency caches.
+# -----------------------------------------------------------------------------
+!/hermes-data/plugins/
+!/hermes-data/plugins/**
+
+# -----------------------------------------------------------------------------
+# HERMES STATIC SCRIPTS
+# -----------------------------------------------------------------------------
+!/hermes-data/scripts/
+!/hermes-data/scripts/**
+
+# Small static wrappers maintained in hermes-data/bin.
+# Large installed binaries (rtk, tirith, uv, etc.) are intentionally excluded.
+!/hermes-data/bin/
+!/hermes-data/bin/godot-lsp-bridge
+!/hermes-data/bin/kanban-online-backup.py
+
+# -----------------------------------------------------------------------------
+# OPERATIONAL HARDENING / PATCH MATERIAL
+#
+# Keep current hardening source, policy templates and documentation.
+# Historical backup directories are not reopened.
+# -----------------------------------------------------------------------------
+!/hermes-data/operational-hardening/
+!/hermes-data/operational-hardening/**
+
+# =============================================================================
+# GLOBAL RE-IGNORE RULES INSIDE ALLOWED TREES
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# SECRETS / CREDENTIALS
+# -----------------------------------------------------------------------------
 **/.env
 **/auth.json
 **/auth.lock
@@ -101,13 +171,17 @@
 **/*.key
 **/*.p12
 **/*.pfx
+**/*.crt
 
-# Permit sanitized env templates after the secret rules above
+# Sanitized templates remain allowed.
 !/.env.example
 !/compose/.env.example
-!/profiles/*/.env.example
+!/hermes-data/.env.example
+!/hermes-data/profiles/*/.env.example
 
-# Databases / mutable state
+# -----------------------------------------------------------------------------
+# DATABASES / MUTABLE STATE
+# -----------------------------------------------------------------------------
 **/*.db
 **/*.db-*
 **/*.sqlite
@@ -116,9 +190,12 @@
 **/*-wal
 **/*-shm
 
-# Logs / histories / runtime traces
+# -----------------------------------------------------------------------------
+# LOGS / SESSIONS / RUNTIME TRACES
+# -----------------------------------------------------------------------------
 **/*.log
 **/*.log.*
+**/*.jsonl
 **/.hermes_history
 **/logs/
 **/sessions/
@@ -127,8 +204,25 @@
 **/forensics/
 **/recovery/
 **/cron/
+**/state/
 
-# Locks / pids / runtime markers
+# -----------------------------------------------------------------------------
+# GOVERNOR / RUNTIME STATE
+# -----------------------------------------------------------------------------
+**/governance/cases/
+**/governance/events*
+**/governance/state.json
+**/governance/*.lock
+**/governance-evidence-before-*/
+**/.events.jsonl.lock
+**/.state.json.lock
+
+# Re-allow the static Governor policy after runtime rules.
+!/hermes-data/profiles/execution-governor/governance/policy.yaml
+
+# -----------------------------------------------------------------------------
+# LOCKS / PIDS / RUNTIME MARKERS
+# -----------------------------------------------------------------------------
 **/*.lock
 **/*.pid
 **/.clean_shutdown
@@ -136,7 +230,9 @@
 **/.codex_gpt55_autoraise_notice
 **/.scratch_tip_shown
 
-# Caches / generated model metadata
+# -----------------------------------------------------------------------------
+# CACHES / GENERATED MODEL METADATA
+# -----------------------------------------------------------------------------
 **/.cache/
 **/cache/
 **/models_dev_cache.json
@@ -150,9 +246,8 @@
 **/gateway-starts.log
 **/tui-theme-boot.json
 
-# Skills Hub / Curator runtime state
-**/.hub/index-cache/
-**/.hub/audit.log
+# Skills Hub / Curator mutable state
+**/.hub/
 **/.curator_backups/
 **/.curator_state
 **/.usage.json
@@ -161,7 +256,13 @@
 **/broken-root-symlinks-*.txt
 **/*install-report*.txt
 
-# Language/runtime dependency trees
+# Keep bundled manifests despite generic skill/runtime filtering.
+!/hermes-data/skills/.bundled_manifest
+!/hermes-data/profiles/*/skills/.bundled_manifest
+
+# -----------------------------------------------------------------------------
+# LANGUAGE / PACKAGE MANAGER DEPENDENCIES
+# -----------------------------------------------------------------------------
 **/__pycache__/
 **/*.py[cod]
 **/.venv/
@@ -174,8 +275,14 @@
 **/lsp/
 **/lazy-packages/
 
-# Backups / temporary / corrupted copies
+# -----------------------------------------------------------------------------
+# BACKUPS / TEMPORARY / OLD COPIES
+# -----------------------------------------------------------------------------
 **/backups/
+**/.operational-hardening-backup-*/
+**/.dirty-checkpoint-recovery-backup-*/
+**/.dirty-checkpoint-recovery-v2-backup-*/
+**/logs_before_governor_*/
 **/*.bak
 **/*.bak-*
 **/*.bak.*
@@ -188,7 +295,9 @@
 **/*.swp
 **/*.swo
 
-# Archives / generated bundles
+# -----------------------------------------------------------------------------
+# ARCHIVES / GENERATED BUNDLES
+# -----------------------------------------------------------------------------
 **/*.zip
 **/*.tar
 **/*.tar.gz
@@ -197,21 +306,56 @@
 **/*.7z
 **/*.rar
 
-# Binary artifacts that do not help GPT inspect configuration/behavior
+# -----------------------------------------------------------------------------
+# LARGE / INSTALLED BINARIES
+# -----------------------------------------------------------------------------
 **/*.so
 **/*.dll
 **/*.dylib
 **/*.exe
 **/*.bin
 **/*.dat
-**/*.pdf
 
-# Optional media assets: not needed for operational/configuration inspection
+# Known installed binaries under hermes-data/bin
+/hermes-data/bin/rtk
+/hermes-data/bin/tirith
+
+# -----------------------------------------------------------------------------
+# MEDIA / NON-TEXTUAL ASSETS
+# Generally not useful for GPT operational inspection.
+# -----------------------------------------------------------------------------
 **/*.png
 **/*.jpg
 **/*.jpeg
 **/*.gif
 **/*.webp
+**/*.pdf
 
-# Git internals / nested repositories
+# -----------------------------------------------------------------------------
+# NESTED GIT INTERNALS
+# -----------------------------------------------------------------------------
 **/.git/
+
+# =============================================================================
+# TOP-LEVEL DIRECTORIES INTENTIONALLY EXCLUDED
+#
+# These remain ignored because /* denies them and they are never reopened:
+#
+# /backups/
+# /logs/
+# /teste/
+# /workspace/
+# =============================================================================
+
+# ============================================================================
+# FINAL OVERRIDES — problematic Linux links/binaries
+# These rules must remain at the END of this file.
+# ============================================================================
+
+/hermes-data/bin/*
+!/hermes-data/bin/godot-lsp-bridge
+!/hermes-data/bin/kanban-online-backup.py
+
+/hermes-data/bin/graphify
+/hermes-data/bin/graphify-mcp
+/hermes-data/skills/graphify/

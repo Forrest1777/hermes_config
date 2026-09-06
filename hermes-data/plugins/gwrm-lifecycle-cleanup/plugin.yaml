@@ -1,0 +1,9 @@
+name: gwrm-lifecycle-cleanup
+version: "1.0.0"
+description: Automatic GWRM teardown for Hermes Kanban worker lifecycle.
+provides_hooks:
+  - kanban_task_completed
+  - kanban_task_blocked
+  - on_kanban_worker_exited
+  - on_kanban_worker_stale_claim
+  - on_kanban_dispatch_tick

@@ -1,0 +1,13 @@
+name: execution-governance
+version: 0.3.1
+description: Narrow decision tools for the execution-governor profile.
+manifest_version: 2
+api_version: 1
+tags:
+- governance
+- kanban
+- budget
+- progress
+
+provides_hooks:
+  - transform_llm_output

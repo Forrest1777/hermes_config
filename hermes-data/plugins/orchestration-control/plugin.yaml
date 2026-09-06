@@ -1,0 +1,5 @@
+name: orchestration-control
+version: 1.0.0
+description: Narrow, audited cross-card reactivation bridge for implementation-orchestrator roots.
+provides_tools:
+  - orchestration_unblock_card

@@ -1,0 +1,4 @@
+description: "Executa somente cards de implementa\xE7\xE3o delimitados, com Task Context\
+  \ Packet completo, criados pelo implementation-orchestrator. N\xE3o cria cards,\
+  \ n\xE3o redefine arquitetura e n\xE3o delega tarefas."
+description_auto: false

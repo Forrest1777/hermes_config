@@ -1,0 +1,37 @@
+# Normalize text files consistently across Windows host and Linux containers.
+* text=auto
+
+# Linux/container-oriented files
+*.sh text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+
+# Windows-oriented scripts
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Extensionless shell/wrapper scripts commonly used by Hermes
+hermes-data/bin/godot-lsp-bridge text eol=lf
+
+# Binary files: never apply text normalization
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.tar binary
+*.tgz binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary

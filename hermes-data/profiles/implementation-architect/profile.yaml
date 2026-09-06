@@ -1,0 +1,5 @@
+description: "Nunca recebe cards raiz, fases completas ou tarefas gen\xE9ricas. Atua\
+  \ somente em cards expl\xEDcitos de revis\xE3o arquitetural criados pelo implementation-orchestrator\
+  \ ap\xF3s uma inconsist\xEAncia concreta. N\xE3o cria workers, n\xE3o decomp\xF5\
+  e fases e n\xE3o gerencia cards filhos."
+description_auto: false

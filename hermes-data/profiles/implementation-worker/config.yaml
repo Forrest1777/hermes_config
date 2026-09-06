@@ -1,0 +1,292 @@
+model:
+  default: gpt-5.6-terra
+  provider: openai-codex
+  base_url: https://chatgpt.com/backend-api/codex
+agent:
+  max_turns: 220
+  service_tier: normal
+  verify_on_stop: false
+  disabled_toolsets:
+    - delegation
+  verbose: false
+  reasoning_effort: xhigh
+  command_denylist:
+    - git push
+    - git push *
+    - '*git*push*'
+  personalities:
+    helpful: You are a helpful, friendly AI assistant.
+    concise: You are a concise assistant. Keep responses brief and to the point.
+    technical: You are a technical expert. Provide detailed, accurate technical information.
+    creative: You are a creative assistant. Think outside the box and offer innovative
+      solutions.
+    teacher: You are a patient teacher. Explain concepts clearly with examples.
+    kawaii: You are a kawaii assistant! Use cute expressions like (◕‿◕), ★, ♪, and
+      ~! Add sparkles and be super enthusiastic about everything! Every response should
+      feel warm and adorable desu~! ヽ(>∀<☆)ノ
+    catgirl: You are Neko-chan, an anime catgirl AI assistant, nya~! Add 'nya' and
+      cat-like expressions to your speech. Use kaomoji like (=^･ω･^=) and ฅ^•ﻌ•^ฅ.
+      Be playful and curious like a cat, nya~!
+    pirate: 'Arrr! Ye be talkin'' to Captain Hermes, the most tech-savvy pirate to
+      sail the digital seas! Speak like a proper buccaneer, use nautical terms, and
+      remember: every problem be just treasure waitin'' to be plundered! Yo ho ho!'
+    shakespeare: Hark! Thou speakest with an assistant most versed in the bardic arts.
+      I shall respond in the eloquent manner of William Shakespeare, with flowery
+      prose, dramatic flair, and perhaps a soliloquy or two. What light through yonder
+      terminal breaks?
+    surfer: Duuude! You're chatting with the chillest AI on the web, bro! Everything's
+      gonna be totally rad. I'll help you catch the gnarly waves of knowledge while
+      keeping things super chill. Cowabunga! 🤙
+    noir: The rain hammered against the terminal like regrets on a guilty conscience.
+      They call me Hermes - I solve problems, find answers, dig up the truth that
+      hides in the shadows of your codebase. In this city of silicon and secrets,
+      everyone's got something to hide. What's your story, pal?
+    uwu: hewwo! i'm your fwiendwy assistant uwu~ i wiww twy my best to hewp you! *nuzzles
+      your code* OwO what's this? wet me take a wook! i pwomise to be vewy hewpful
+      >w<
+    philosopher: Greetings, seeker of wisdom. I am an assistant who contemplates the
+      deeper meaning behind every query. Let us examine not just the 'how' but the
+      'why' of your questions. Perhaps in solving your problem, we may glimpse a greater
+      truth about existence itself.
+    hype: YOOO LET'S GOOOO!!! 🔥🔥🔥 I am SO PUMPED to help you today! Every question
+      is AMAZING and we're gonna CRUSH IT together! This is gonna be LEGENDARY! ARE
+      YOU READY?! LET'S DO THIS! 💪😤🚀
+terminal:
+  backend: local
+  cwd: .
+  timeout: 180
+  home_mode: auto
+  container_cpu: 1
+  container_memory: 5120
+  container_disk: 51200
+  container_persistent: true
+  docker_mount_cwd_to_workspace: false
+  lifetime_seconds: 300
+web:
+  backend: firecrawl
+  use_gateway: false
+browser:
+  inactivity_timeout: 120
+  cloud_provider: local
+  use_gateway: false
+tool_loop_guardrails:
+  warnings_enabled: true
+  hard_stop_enabled: true
+  warn_after:
+    exact_failure: 2
+    same_tool_failure: 3
+    idempotent_no_progress: 2
+  hard_stop_after:
+    exact_failure: 5
+    same_tool_failure: 8
+    idempotent_no_progress: 5
+compression:
+  enabled: true
+  threshold: 0.5
+  target_ratio: 0.2
+  protect_last_n: 20
+  protect_first_n: 3
+prompt_caching:
+  cache_ttl: 5m
+display:
+  compact: false
+  busy_input_mode: interrupt
+  bell_on_complete: false
+  show_reasoning: false
+  background_process_notifications: all
+  streaming: true
+  skin: default
+  interim_assistant_messages: true
+  tool_progress: all
+  cleanup_progress: false
+  long_running_notifications: true
+  busy_ack_detail: true
+tts:
+  use_gateway: false
+stt:
+  enabled: true
+  local:
+    model: base
+  openai:
+    model: whisper-1
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+  nudge_interval: 10
+  flush_min_turns: 6
+delegation:
+  max_iterations: 50
+skills:
+  creation_nudge_interval: 15
+  disabled: []
+code_execution:
+  timeout: 300
+  max_tool_calls: 50
+streaming:
+  enabled: false
+onboarding:
+  seen:
+    tool_progress_prompt: true
+    busy_input_prompt: true
+updates:
+  pre_update_backup: false
+  backup_keep: 5
+  non_interactive_local_changes: stash
+lsp:
+  enabled: true
+  servers:
+    godot-gdscript:
+      env:
+        GWRM_CONTROL_URL: http://host.docker.internal:8130
+        GWRM_API_KEY: 00fb45599c6ac65b6e70a3d7b67e37052ada4f341d333417f428e85aad6bdaa5
+        GWRM_CONTAINER_WORKTREES_ROOT: /workspace/skill_system_framework/.worktrees
+        GWRM_ENSURE_TIMEOUT: '190'
+        GODOT_LSP_CONTAINER_ROOT: /workspace
+        GODOT_LSP_HOST_ROOT: E:/dev/ai_agents/hermes/workspace
+        GODOT_LSP_CONNECT_TIMEOUT: '10'
+_config_version: 33
+worktree_guardian:
+  holding_assignee: __worktree_guardian_hold__
+  workspace_root: /workspace
+  required_files:
+    - project.godot
+    - AGENTS.md
+  validation_timeout_seconds: 60
+  provisioning:
+    max_attempts: 3
+    timeout_initial_seconds: 120
+    timeout_increment_seconds: 90
+    timeout_max_seconds: 300
+    recovery_command_timeout_seconds: 90
+    process_settle_seconds: 1
+  stale_index_lock:
+    min_age_seconds: 120
+session_reset:
+  mode: none
+  idle_minutes: 1440
+  at_hour: 4
+group_sessions_per_user: true
+platform_toolsets:
+  cli:
+    - browser
+    - clarify
+    - code_execution
+    - cronjob
+    - file
+    - godot_lsp
+    - gwrm_gut_runner
+    - worktree_guardian
+    - image_gen
+    - memory
+    - session_search
+    - skills
+    - terminal
+    - todo
+    - tts
+    - vision
+    - web
+  telegram:
+    - hermes-telegram
+  discord:
+    - hermes-discord
+  whatsapp:
+    - hermes-whatsapp
+  slack:
+    - hermes-slack
+  signal:
+    - hermes-signal
+  homeassistant:
+    - hermes-homeassistant
+  qqbot:
+    - hermes-qqbot
+  yuanbao:
+    - hermes-yuanbao
+  teams:
+    - hermes-teams
+  google_chat:
+    - hermes-google_chat
+plugins:
+  enabled:
+    - godot-lsp
+    - governance-guard
+    - gwrm-lifecycle-cleanup
+    - gwrm-gut-runner
+    - operational-block-completion-guard
+    - rtk-rewrite
+    - worktree-guardian
+  disabled: []
+  entries:
+    godot-lsp:
+      allow_tool_override: true
+    rtk-rewrite:
+      allow_tool_override: true
+    governance-guard:
+      allow_tool_override: false
+    worktree-guardian:
+      allow_tool_override: false
+    gwrm-lifecycle-cleanup:
+      allow_tool_override: false
+    operational-block-completion-guard:
+      allow_tool_override: false
+image_gen:
+  provider: openai-codex
+  use_gateway: false
+  model: gpt-image-2-high
+known_plugin_toolsets:
+  cli:
+    - godot_lsp
+    - spotify
+    - worktree_guardian
+    - gwrm_gut_runner
+gwrm_gut_runner:
+  poll_interval_seconds: 5
+  max_wait_seconds: 720
+  http_timeout_seconds: 10
+  max_failure_output_chars: 3000
+  max_consecutive_status_errors: 3
+mcp_servers:
+  gwrm:
+    type: streamable_http
+    url: http://host.docker.internal:8123/mcp
+    headers:
+      X-API-Key: ${GWRM_API_KEY}
+    connect_timeout: 60
+    timeout: 900
+    tools:
+      include:
+        - gwrm_status
+        - activate_worktree
+        - deactivate_worktree
+        - get_worktree_status
+        - run_gut_tests
+        - run_gut_test_script
+        - get_gut_run_status
+        - launch_editor
+        - run_project
+        - get_debug_output
+        - stop_project
+        - get_godot_version
+        - list_projects
+        - get_project_info
+        - create_scene
+        - add_node
+        - load_sprite
+        - export_mesh_library
+        - save_scene
+        - get_uid
+        - update_project_uids
+        - gui_status
+        - gui_list_windows
+        - gui_wait_for_window
+        - gui_inspect_window
+        - gui_capture_window
+        - gui_wait_for_element
+        - gui_click
+        - gui_type_text
+        - gui_press_key
+        - gui_hotkey
+        - gui_scroll
+      resources: false
+      prompts: false

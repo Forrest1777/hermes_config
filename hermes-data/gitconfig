@@ -1,0 +1,4 @@
+[safe]
+	directory = /workspace/skill_system_framework
+[core]
+	sparsecheckout = false

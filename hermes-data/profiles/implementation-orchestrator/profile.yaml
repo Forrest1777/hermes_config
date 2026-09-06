@@ -1,0 +1,5 @@
+description: "\"\xDAnico profile autorizado a receber cards raiz de fases. Analisa\
+  \ a fase, cria o plano, decomp\xF5e em cards, define depend\xEAncias e Task Context\
+  \ Packets, coordena workers, aciona o architect somente ap\xF3s uma inconsist\xEA\
+  ncia arquitetural concreta e integra os commits."
+description_auto: false

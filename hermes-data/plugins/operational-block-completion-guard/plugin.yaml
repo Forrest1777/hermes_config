@@ -1,0 +1,5 @@
+name: operational-block-completion-guard
+version: "1.0.0"
+description: Prevent BLOCKED_OPERATIONAL handoffs from becoming completed/done tasks.
+provides_hooks:
+  - on_kanban_dispatch_tick

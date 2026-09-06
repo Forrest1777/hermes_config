@@ -1,0 +1,6 @@
+name: gwrm-gut-runner
+version: 0.1.2
+description: Runs supervised GUT operations through GWRM with safe bounded waits, continuation by operation id, and duplicate-failure protection, and verified test-failure semantics.
+provides_tools:
+  - gwrm_gut_run_and_wait
+  - gwrm_gut_wait_existing

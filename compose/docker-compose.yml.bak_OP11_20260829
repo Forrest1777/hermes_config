@@ -1,0 +1,89 @@
+services:
+  hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes
+    restart: unless-stopped
+    command: ["hermes", "-p", "default", "gateway", "run"]
+
+    ports:
+      - "127.0.0.1:8642:8642"
+      - "127.0.0.1:9119:9119"
+
+    volumes:
+      # Dados persistentes gerais do Hermes
+      - type: bind
+        source: E:\dev\ai_agents\hermes\hermes-data
+        target: /opt/data
+
+      # Repositórios e worktrees
+      - type: bind
+        source: E:\dev\ai_agents\hermes\workspace
+        target: /workspace
+        
+      - type: bind
+        source: ./99-hermes-path.sh
+        target: /etc/profile.d/99-hermes-path.sh
+        read_only: true
+      
+      - type: bind
+        source: E:\dev\ai_agents\hermes\hermes-data\.hermes
+        target: /root/.hermes
+    
+      # Banco ativo do Kanban em filesystem Linux
+      - type: volume
+        source: hermes-kanban
+        target: /var/lib/hermes-kanban
+
+      # Logs produzidos diretamente pelo Hermes
+      - type: bind
+        source: 'E:\dev\ai_agents\hermes\logs\runtime'
+        target: /opt/data/logs
+
+      # Logs individuais dos workers Kanban
+      - type: bind
+        source: 'E:\dev\ai_agents\hermes\logs\workers'
+        target: /var/lib/hermes-kanban/kanban/logs
+
+      # Logs do AI ARENA
+      - type: bind
+        source: 'E:\dev\ai_agents\hermes\logs\ai_arena_logs'
+        target: /opt/data/logs/ai_arena_logs
+
+    environment:
+      PATH: "/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/bin:/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      
+      HERMES_WRITE_SAFE_ROOT: "/workspace"
+      
+      GIT_OPTIONAL_LOCKS: "0"
+      
+      GIT_CONFIG_GLOBAL: "/opt/data/gitconfig"
+      GIT_TRACE2_EVENT: "/opt/data/logs/git-trace2"
+      
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: "0.0.0.0"
+      HERMES_DASHBOARD_PORT: "9119"
+
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: "${HERMES_DASHBOARD_BASIC_AUTH_USERNAME}"
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD}"
+      HERMES_DASHBOARD_BASIC_AUTH_SECRET: "${HERMES_DASHBOARD_BASIC_AUTH_SECRET}"
+      
+      HERMES_KANBAN_HOME: /var/lib/hermes-kanban
+
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: "0.0.0.0"
+      API_SERVER_KEY: "${API_SERVER_KEY}"
+      API_SERVER_CORS_ORIGINS: "*"
+      
+      HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS: "900"
+    
+    logging:
+      driver: local
+      options:
+        max-size: "20m"
+        max-file: "10"
+    
+volumes:
+  hermes-kanban:
+    external: true
+    name: ${HERMES_KANBAN_VOLUME_NAME}
+  

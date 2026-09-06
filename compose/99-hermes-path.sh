@@ -1,0 +1,1 @@
+export PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/bin:/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

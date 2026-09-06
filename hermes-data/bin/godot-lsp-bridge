@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Bridge stdio/TCP para o Godot LSP, resolvendo a porta dinamica no GWRM."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import sys
+import threading
+from dataclasses import dataclass
+from typing import Any, BinaryIO
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, unquote, urlsplit
+from urllib.request import Request, urlopen
+
+class BridgeError(RuntimeError):
+    pass
+
+def norm(value: str) -> str:
+    value = value.strip().replace("\\", "/")
+    return value.rstrip("/") if value != "/" else value
+
+def windows_path(value: str) -> bool:
+    return len(value) >= 2 and value[0].isalpha() and value[1] == ":"
+
+def path_to_uri(value: str) -> str:
+    from urllib.parse import quote as q
+    value = norm(value)
+    if windows_path(value): value = "/" + value
+    elif not value.startswith("/"): value = "/" + value
+    return "file://" + q(value, safe="/:")
+
+def uri_to_path(uri: str) -> str | None:
+    parsed = urlsplit(uri)
+    if parsed.scheme.lower() != "file": return None
+    value = unquote(parsed.path)
+    if parsed.netloc: value = f"//{parsed.netloc}{value}"
+    if len(value) >= 3 and value[0] == "/" and value[1].isalpha() and value[2] == ":": value = value[1:]
+    return norm(value)
+
+def replace_prefix(value: str, source: str, target: str, case_sensitive: bool) -> str | None:
+    value, source, target = norm(value), norm(source), norm(target)
+    lhs, rhs = (value, source) if case_sensitive else (value.lower(), source.lower())
+    if lhs == rhs: return target
+    if lhs.startswith(rhs + "/"): return target + value[len(source):]
+    return None
+
+@dataclass(frozen=True)
+class PathMapper:
+    container_root: str
+    host_root: str
+    def rewrite_string(self, value: str, to_host: bool) -> str:
+        if value.lower().startswith("file://"):
+            raw = uri_to_path(value)
+            if raw is None: return value
+            mapped = replace_prefix(raw, self.container_root if to_host else self.host_root, self.host_root if to_host else self.container_root, to_host)
+            return path_to_uri(mapped) if mapped is not None else value
+        mapped = replace_prefix(value, self.container_root if to_host else self.host_root, self.host_root if to_host else self.container_root, to_host)
+        return mapped if mapped is not None else value
+    def rewrite(self, value: Any, to_host: bool) -> Any:
+        if isinstance(value, str): return self.rewrite_string(value, to_host)
+        if isinstance(value, list): return [self.rewrite(v, to_host) for v in value]
+        if isinstance(value, dict): return {self.rewrite_string(k, to_host) if isinstance(k, str) else k: self.rewrite(v, to_host) for k, v in value.items()}
+        return value
+
+def read_exact(stream: BinaryIO, size: int) -> bytes:
+    chunks, remaining = [], size
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk: raise EOFError("fim inesperado")
+        chunks.append(chunk); remaining -= len(chunk)
+    return b"".join(chunks)
+
+def read_message(stream: BinaryIO) -> dict[str, Any] | None:
+    headers = {}
+    while True:
+        line = stream.readline()
+        if line == b"": return None
+        if line in (b"\r\n", b"\n"): break
+        key, value = line.decode("ascii").split(":", 1)
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers["content-length"])
+    return json.loads(read_exact(stream, length).decode("utf-8"))
+
+def write_message(stream: BinaryIO, message: dict[str, Any]) -> None:
+    body = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    stream.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")); stream.write(body); stream.flush()
+
+def pump(source: BinaryIO, destination: BinaryIO, mapper: PathMapper, to_host: bool, stop: threading.Event) -> None:
+    try:
+        while not stop.is_set():
+            message = read_message(source)
+            if message is None: return
+            write_message(destination, mapper.rewrite(message, to_host))
+    except (EOFError, BrokenPipeError, ConnectionResetError, OSError):
+        pass
+    except Exception as exc:
+        print(f"[godot-lsp-bridge] erro: {exc}", file=sys.stderr, flush=True)
+    finally:
+        stop.set()
+
+def setting(name: str, default: str = "") -> str:
+    value = os.environ.get(name)
+    return value.strip() if value and value.strip() else default
+
+def derive_worktree(project_root: str, worktrees_root: str) -> str | None:
+    project, root = norm(project_root), norm(worktrees_root)
+    if project.startswith(root + "/"):
+        return project[len(root) + 1:].split("/", 1)[0]
+    return None
+
+def ensure_session() -> tuple[str, int]:
+    project_root = setting("GWRM_PROJECT_ROOT", os.getcwd())
+    worktrees_root = setting("GWRM_CONTAINER_WORKTREES_ROOT", "/workspace/kanban-worktrees")
+    worktree = setting("GWRM_WORKTREE_NAME") or derive_worktree(project_root, worktrees_root)
+    if not worktree: raise BridgeError(f"Nao foi possivel derivar worktree de {project_root}.")
+    control = setting("GWRM_CONTROL_URL", "http://host.docker.internal:8130").rstrip("/")
+    api_key = setting("GWRM_API_KEY")
+    if not api_key: raise BridgeError("GWRM_API_KEY nao configurada.")
+    request = Request(
+        f"{control}/api/v1/worktrees/{quote(worktree, safe='')}/ensure",
+        data=b"{}",
+        headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=float(setting("GWRM_ENSURE_TIMEOUT", "190"))) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise BridgeError(f"Falha consultando GWRM: {exc}") from exc
+    lsp = payload.get("lsp") or {}
+    host, port = lsp.get("host"), lsp.get("port")
+    if not host or not isinstance(port, int): raise BridgeError(f"Resposta GWRM sem endpoint LSP: {payload}")
+    return str(host), port
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--container-root", default=setting("GODOT_LSP_CONTAINER_ROOT", "/workspace"))
+    parser.add_argument("--host-root", default=setting("GODOT_LSP_HOST_ROOT"))
+    parser.add_argument("--connect-timeout", type=float, default=float(setting("GODOT_LSP_CONNECT_TIMEOUT", "10")))
+    return parser.parse_args()
+
+def main() -> int:
+    args = parse_args()
+    if not args.host_root:
+        print("[godot-lsp-bridge] GODOT_LSP_HOST_ROOT nao configurado.", file=sys.stderr); return 2
+    try:
+        host, port = ensure_session()
+        mapper = PathMapper(norm(args.container_root), norm(args.host_root))
+        connection = socket.create_connection((host, port), timeout=args.connect_timeout)
+        connection.settimeout(None)
+    except Exception as exc:
+        print(f"[godot-lsp-bridge] inicializacao falhou: {exc}", file=sys.stderr, flush=True); return 3
+    stop = threading.Event()
+    reader, writer = connection.makefile("rb", buffering=0), connection.makefile("wb", buffering=0)
+    a = threading.Thread(target=pump, args=(reader, sys.stdout.buffer, mapper, False, stop), daemon=True)
+    b = threading.Thread(target=pump, args=(sys.stdin.buffer, writer, mapper, True, stop), daemon=True)
+    a.start(); b.start(); stop.wait()
+    try: connection.shutdown(socket.SHUT_RDWR)
+    except OSError: pass
+    reader.close(); writer.close(); connection.close()
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
