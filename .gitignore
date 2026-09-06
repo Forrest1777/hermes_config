@@ -1,0 +1,217 @@
+# ============================================================================
+# Hermes environment snapshot repository
+# Goal: version only static configuration/behavior files useful for inspection.
+# Strategy: deny everything at the repository root, then explicitly allow the
+# static parts that define Hermes behavior.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# DENY BY DEFAULT
+# ---------------------------------------------------------------------------
+/*
+
+# Repository metadata/docs
+!/.gitignore
+!/README.md
+!/AGENTS.md
+!/LICENSE
+
+# Core Hermes static configuration
+!/SOUL.md
+!/config.yaml
+!/gitconfig
+
+# Optional sanitized environment templates only
+!/.env.example
+
+# Docker/Compose configuration, if this repository root also contains it
+!/docker-compose.yml
+!/compose.yaml
+!/compose.yml
+!/compose/
+!/compose/docker-compose.yml
+!/compose/compose.yaml
+!/compose/compose.yml
+!/compose/.env.example
+
+# ---------------------------------------------------------------------------
+# PROFILES
+# Keep only behavior/configuration plus profile-specific skills/scripts/policy.
+# Everything else inside each profile is runtime state by default.
+# ---------------------------------------------------------------------------
+!/profiles/
+/profiles/*/*
+
+# Core profile definition
+!/profiles/*/SOUL.md
+!/profiles/*/config.yaml
+!/profiles/*/profile.yaml
+!/profiles/*/.env.example
+
+# Profile-specific skills: relevant to actual agent behavior
+!/profiles/*/skills/
+!/profiles/*/skills/**
+
+# Orchestrator operational scripts
+!/profiles/implementation-orchestrator/scripts/
+!/profiles/implementation-orchestrator/scripts/**
+
+# Execution Governor: keep only active policy, not cases/events/state
+!/profiles/execution-governor/governance/
+/profiles/execution-governor/governance/*
+!/profiles/execution-governor/governance/policy.yaml
+
+# ---------------------------------------------------------------------------
+# SHARED SKILLS
+# Static instructions/code used by Hermes agents
+# ---------------------------------------------------------------------------
+!/skills/
+!/skills/**
+
+# ---------------------------------------------------------------------------
+# PLUGINS
+# Plugin code/manifests/tests define operational behavior
+# ---------------------------------------------------------------------------
+!/plugins/
+!/plugins/**
+
+# ---------------------------------------------------------------------------
+# OPERATIONAL SCRIPTS
+# ---------------------------------------------------------------------------
+!/scripts/
+!/scripts/**
+
+# ---------------------------------------------------------------------------
+# OPERATIONAL HARDENING
+# Small static patchers, templates, manifests and documentation useful for
+# diagnosing how this Hermes environment was hardened.
+# ---------------------------------------------------------------------------
+!/operational-hardening/
+!/operational-hardening/**
+
+# ============================================================================
+# RE-IGNORE GENERATED / RUNTIME / SECRET CONTENT INSIDE ALLOWED TREES
+# ============================================================================
+
+# Secrets / credentials
+**/.env
+**/auth.json
+**/auth.lock
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
+# Permit sanitized env templates after the secret rules above
+!/.env.example
+!/compose/.env.example
+!/profiles/*/.env.example
+
+# Databases / mutable state
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite-*
+**/*-wal
+**/*-shm
+
+# Logs / histories / runtime traces
+**/*.log
+**/*.log.*
+**/.hermes_history
+**/logs/
+**/sessions/
+**/terminal-sessions/
+**/spawn-trees/
+**/forensics/
+**/recovery/
+**/cron/
+
+# Locks / pids / runtime markers
+**/*.lock
+**/*.pid
+**/.clean_shutdown
+**/.mcp-discovery.lock
+**/.codex_gpt55_autoraise_notice
+**/.scratch_tip_shown
+
+# Caches / generated model metadata
+**/.cache/
+**/cache/
+**/models_dev_cache.json
+**/models_dev_cache.etag
+**/provider_models_cache.json
+**/ollama_cloud_models_cache.json
+**/context_length_cache.yaml
+**/.skills_prompt_snapshot.json
+**/channel_directory.json
+**/gateway_state.json
+**/gateway-starts.log
+**/tui-theme-boot.json
+
+# Skills Hub / Curator runtime state
+**/.hub/index-cache/
+**/.hub/audit.log
+**/.curator_backups/
+**/.curator_state
+**/.usage.json
+**/.usage.json.lock
+**/graphify.backup/
+**/broken-root-symlinks-*.txt
+**/*install-report*.txt
+
+# Language/runtime dependency trees
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+**/venv/
+**/site-packages/
+**/node_modules/
+**/.npm/
+**/.local/
+**/uv/
+**/lsp/
+**/lazy-packages/
+
+# Backups / temporary / corrupted copies
+**/backups/
+**/*.bak
+**/*.bak-*
+**/*.bak.*
+**/*_BKP.*
+**/*.before-*
+**/*.corrupt.*
+**/*.tmp
+**/*.tmp.*
+**/*~
+**/*.swp
+**/*.swo
+
+# Archives / generated bundles
+**/*.zip
+**/*.tar
+**/*.tar.gz
+**/*.tgz
+**/*.gz
+**/*.7z
+**/*.rar
+
+# Binary artifacts that do not help GPT inspect configuration/behavior
+**/*.so
+**/*.dll
+**/*.dylib
+**/*.exe
+**/*.bin
+**/*.dat
+**/*.pdf
+
+# Optional media assets: not needed for operational/configuration inspection
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.gif
+**/*.webp
+
+# Git internals / nested repositories
+**/.git/
