@@ -1,5 +1,4 @@
 model:
-  #default: gpt-5.6-sol
   default: gpt-6-astra
   provider: openai-codex
   base_url: https://chatgpt.com/backend-api/codex
@@ -161,7 +160,7 @@ lsp:
         GODOT_LSP_CONTAINER_ROOT: /workspace
         GODOT_LSP_HOST_ROOT: E:/dev/ai_agents/hermes/workspace
         GODOT_LSP_CONNECT_TIMEOUT: '10'
-_config_version: 37
+_config_version: 41
 session_reset:
   mode: none
   idle_minutes: 1440
@@ -169,7 +168,6 @@ session_reset:
 group_sessions_per_user: true
 platform_toolsets:
   cli:
-    - bfl
     - browser
     - clarify
     - code_execution
@@ -215,6 +213,7 @@ plugins:
     - gwrm-lifecycle-cleanup
     - operational-block-completion-guard
     - retry-checkpoint-guard
+    - post-ai-combat-hardening
     - rtk-rewrite
   disabled: []
   entries:
@@ -239,9 +238,11 @@ known_plugin_toolsets:
     - a2a
     - godot_lsp
     - spotify
+    - orchestration_control
+    - worktree_guardian
+    - gwrm_gut_runner
 known_builtin_toolsets:
   cli:
-    - bfl
     - browser
     - clarify
     - code_execution

@@ -1,6 +1,6 @@
 ---
 name: blocked-page-recovery
-description: "Recover blocked/paywalled/WAF'd pages via fallbacks."
+description: "Use when a fetch fails: 403/429, paywall, WAF, bot wall."
 version: 1.0.0
 author: Hermes Agent
 license: MIT

@@ -582,6 +582,15 @@ def _api_request_error(provider=None, model=None, status_code=None, retry_count=
         **payload,
     )
 
+# HERMES_GIT_SNAPSHOT_TIMEOUT_2026_09_07
+def _git_snapshot_timeout_seconds() -> int:
+    try:
+        raw = ((_load_policy().get("progress") or {}).get("git_snapshot_timeout_seconds") or 30)
+        return max(5, int(raw))
+    except Exception:
+        return 30
+
+
 def _git_snapshot(workspace_path: str | None) -> dict[str, Any]:
     if not workspace_path:
         return {"available": False, "reason": "no_workspace"}
@@ -596,7 +605,7 @@ def _git_snapshot(workspace_path: str | None) -> dict[str, Any]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=4,
+            timeout=_git_snapshot_timeout_seconds(),
             check=False,
         )
         if completed.returncode != 0:
@@ -801,7 +810,9 @@ def _hold_task(ctx, task_id: str, board: str | None, reason: str, kind: str) -> 
         return {"ok": False, "skipped": "global_kanban_override_conflict", "board": effective_board, **conflict}
     try:
         from hermes_cli import kanban_db as kb
-        conn = kb.connect(board=effective_board)
+        # HERMES_V021_KANBAN_CONNECT_2026_09_07
+        from hermes_cli.kanban_db_connect import connect as _kanban_connect
+        conn = _kanban_connect(board=effective_board)
         try:
             task = kb.get_task(conn, task_id)
             if task is None:
@@ -843,7 +854,7 @@ def _task_scope(task_id: str, board: str | None) -> dict[str, Any]:
                 "scope_status": "global_kanban_override_conflict", **conflict}
     try:
         from hermes_cli import kanban_db as kb
-        conn = kb.connect(board=b)
+        conn = _kanban_connect(board=b)
         try:
             task = kb.get_task(conn, task_id)
             if task is None:
@@ -973,7 +984,7 @@ def _request_dirty_checkpoint_recovery(args: dict, **kwargs) -> str:
     policy = _load_policy()
     try:
         from hermes_cli import kanban_db as kb
-        conn = kb.connect(board=board)
+        conn = _kanban_connect(board=board)
         try:
             root = kb.get_task(conn, root_id)
             target = kb.get_task(conn, target_id)
@@ -1155,7 +1166,7 @@ def _ensure_dirty_recovery_case_for_task(
 
     try:
         from hermes_cli import kanban_db as kb
-        conn = kb.connect(board=effective_board)
+        conn = _kanban_connect(board=effective_board)
         try:
             task = kb.get_task(conn, tid)
             if task is None:
@@ -1355,7 +1366,7 @@ def _dirty_recovery_catchup_scan(board: str | None) -> dict[str, Any]:
     candidates: list[str] = []
     try:
         from hermes_cli import kanban_db as kb
-        conn = kb.connect(board=effective_board)
+        conn = _kanban_connect(board=effective_board)
         try:
             for task in list(kb.list_tasks(conn, limit=max_tasks) or []):
                 status = str(getattr(task, "status", "") or "")
@@ -1513,7 +1524,7 @@ def _reopen_completed_governor_card(
     effective_board = _normalized_board(board)
     try:
         from hermes_cli import kanban_db as kb
-        conn = kb.connect(board=effective_board)
+        conn = _kanban_connect(board=effective_board)
         try:
             task = kb.get_task(conn, task_id)
             if task is None:
@@ -1671,7 +1682,7 @@ def _reconcile_error_governor(board: str, policy: dict[str, Any]) -> dict[str, A
     governor_task = None
     try:
         from hermes_cli import kanban_db as kb
-        conn = kb.connect(board=effective_board)
+        conn = _kanban_connect(board=effective_board)
         try:
             governor_task = kb.get_task(conn, governor_task_id) if governor_task_id else None
         finally:
@@ -1854,7 +1865,7 @@ def _ensure_board_governor(
 
     try:
         from hermes_cli import kanban_db as kb
-        conn = kb.connect(board=effective_board)
+        conn = _kanban_connect(board=effective_board)
         try:
             task_id = str(queued.get("governor_task_id") or "")
             task = kb.get_task(conn, task_id) if task_id else None
@@ -1973,7 +1984,7 @@ def _update_case_status_file(case_id: str, status: str, **metadata: Any) -> None
 def _comment_task(board: str | None, task_id: str, body: str) -> None:
     try:
         from hermes_cli import kanban_db as kb
-        conn = kb.connect(board=_normalized_board(board))
+        conn = _kanban_connect(board=_normalized_board(board))
         try:
             kb.add_comment(conn, task_id, author="execution-governance", body=body)
         finally:
@@ -2186,7 +2197,7 @@ def _resume_due_provider_waits(board_hint: str | None = None) -> None:
 
         try:
             from hermes_cli import kanban_db as kb
-            conn = kb.connect(board=board)
+            conn = _kanban_connect(board=board)
             try:
                 task = kb.get_task(conn, task_id)
                 if task is None or getattr(task, "current_run_id", None) is not None:
@@ -2518,7 +2529,7 @@ def _on_dispatch_tick_factory(ctx, worker_exited_handler):
         for raw_tid in timed_out:
             tid = str(raw_tid)
             try:
-                conn = kb.connect(board=effective_board)
+                conn = _kanban_connect(board=effective_board)
                 try:
                     task = kb.get_task(conn, tid)
                     run = kb.latest_run(conn, tid)

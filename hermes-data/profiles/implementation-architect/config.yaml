@@ -214,6 +214,7 @@ plugins:
     - operational-block-completion-guard
     - rtk-rewrite
     - worktree-guardian
+    - post-ai-combat-hardening
   disabled: []
   entries:
     godot-lsp:

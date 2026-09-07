@@ -1,0 +1,3 @@
+name: post-ai-combat-hardening
+version: 1.0.0
+description: Pre-spawn GWRM health guard and conservative transient Godot UID hygiene.

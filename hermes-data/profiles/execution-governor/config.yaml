@@ -4,6 +4,11 @@ model:
   base_url: https://api.groq.com/openai/v1
   api_key: ${HERMES_CUSTOM_API_GROQ_COM_API_KEY}
   max_tokens: 128
+# Post AI-COMBAT: keep the tiny Groq Governor as primary, but avoid
+# making recovery depend on one secondary provider being available.
+fallback_model:
+  provider: openai-codex
+  model: gpt-5.6-terra
 agent:
   max_turns: 3
   tool_use_enforcement: true

@@ -441,3 +441,11 @@ Ao detectar `SQLITE_CORRUPT`, “database disk image is malformed”, `integrity
 ## 12. Postura
 
 Seja direto, técnico e orientado a evidências. Não esconda falhas nem declare sucesso sem validação.
+
+## 10. Emendas pós AI-COMBAT (HERMES_AI_COMBAT_WORKER_2026_09_07)
+
+- O Task Context Packet deve declarar `gwrm_required: true | false`; não infira `true` por ritual. Se `false`, não ative nem consulte GWRM.
+- O ambiente pode remover automaticamente somente `.gd.uid` **untracked**, não-symlink, cujo `.gd` correspondente já exista em `HEAD` e cujo próprio UID não exista em `HEAD`. Essa higiene é tratada como descarte de artefato transitório do Godot, não como `git clean`.
+- `.gd.uid` tracked ou associado a um `.gd` novo/untracked nunca é removido automaticamente.
+- Se um card `gwrm_required: true` ainda não tiver sido despachado e o GWRM estiver indisponível, o preflight do dispatcher pode mantê-lo em `ready` sem consumir tentativa/sessão LLM.
+

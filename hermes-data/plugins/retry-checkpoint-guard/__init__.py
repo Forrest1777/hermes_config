@@ -515,7 +515,10 @@ def register(ctx):
         kanban_db as kb,
     )
 
-    current = kb.check_respawn_guard
+    # HERMES_V021_DISPATCH_GUARD_2026_09_07
+    import importlib
+    kbd = importlib.import_module("hermes_cli.kanban_db_dispatch")
+    current = kbd.check_respawn_guard
 
     if getattr(
         current,
@@ -535,6 +538,9 @@ def register(ctx):
             current
         )
 
+        kbd.check_respawn_guard = (
+            _guarded_respawn
+        )
         kb.check_respawn_guard = (
             _guarded_respawn
         )

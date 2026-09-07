@@ -277,6 +277,15 @@ def governance_status(args: dict, **kwargs) -> str:
 
 
 # HERMES_DIRTY_CHECKPOINT_RECOVERY_2026_09_04: revalidate the exact live Git fingerprint before authorization.
+# HERMES_GIT_SNAPSHOT_TIMEOUT_2026_09_07
+def _governance_git_timeout_seconds() -> int:
+    try:
+        raw = ((_policy().get("progress") or {}).get("git_snapshot_timeout_seconds") or 30)
+        return max(5, int(raw))
+    except Exception:
+        return 30
+
+
 def _live_retry_checkpoint(workspace: str) -> dict[str, Any]:
     path = Path(workspace).resolve(strict=False)
     if not path.is_dir():
@@ -289,7 +298,7 @@ def _live_retry_checkpoint(workspace: str) -> dict[str, Any]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=10,
+            timeout=_governance_git_timeout_seconds(),
             check=False,
         )
         if proc.returncode != 0:

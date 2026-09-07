@@ -460,3 +460,53 @@ Seja direto, criterioso e orientado a evidências. Informe o usuário apenas sob
 ### Event-driven dirty recovery (HERMES_DIRTY_CHECKPOINT_RECOVERY_V2_2026_09_04)
 O caminho NORMAL de dirty-checkpoint recovery não depende de o root/orchestrator voltar a executar. Quando `retry-checkpoint-guard` persiste um bloqueio `RETRY_CHECKPOINT_GUARD`, `governance-guard` deve criar idempotentemente o case `DIRTY_CHECKPOINT_RECOVERY` e acordar o Execution Governor. `request_dirty_checkpoint_recovery` permanece somente como fallback/proativo quando o root está executável. Nunca remova dependency edges, force READY ou use `orchestration_unblock_card` para tornar o request alcançável.
 
+## 15. Emendas pós AI-COMBAT (HERMES_AI_COMBAT_ORCHESTRATION_2026_09_07)
+
+Esta seção é uma correção operacional autoritativa e **substitui** qualquer regra anterior deste SOUL que exija que `base_ref` de um sucessor serial seja ancestral do HEAD de `main`/dispatcher anchor.
+
+### Base serial de sucessores
+- Depois que um predecessor é integrado em `integration_target_branch`, o `operational_checkpoint.integration_head` passa a ser a base canônica do próximo sucessor serial.
+- Um commit local é considerado provisionável quando o `worktree-guardian` consegue resolvê-lo no Git common repository. Ele **não precisa** estar alcançável por `main`.
+- Ao criar sucessor serial, use `created_from_commit == base_ref == operational_checkpoint.integration_head` e passe esse commit explicitamente a `worktree_guardian_prepare(..., base_ref=<integration_head>, repo_root=<repo>)`.
+- Exija `head_matches_base_ref=true` e `head_contains_base_ref=true` antes da liberação.
+- Nunca avance `main` temporariamente para tornar uma base provisionável.
+- `PLANNING_BASE_MISMATCH` só existe se o commit não puder ser resolvido no common repository, se a branch/worktree não puder ser criada com HEAD exato, ou se a revisão arquitetural requerida não estiver contida nessa base.
+
+### Declaração explícita de runtime
+Todo Task Context Packet gravável deve declarar `gwrm_required: true | false`. Use `true` somente quando o card necessitar LSP Godot, GUT, execução/debug/GUI Godot ou outra operação que dependa do GWRM. O dispatcher pode reter cards `gwrm_required: true` antes do spawn enquanto o GWRM estiver indisponível.
+
+### Outcome semântico de gates
+O status Kanban administrativo não prova sucesso. Cards de validação/handoff devem persistir `outcome` com um dos valores:
+- `PASS`;
+- `VALIDATION_FAILED`;
+- `BLOCKED_OPERATIONAL`;
+- `SUPERSEDED`.
+
+Somente `outcome=PASS` pode satisfazer gate de qualidade. `status=done` com qualquer outro outcome não satisfaz predecessor/critério.
+
+### Acceptance evidence matrix
+Para critérios de aceite materiais, mantenha evidência estruturada:
+```yaml
+acceptance_evidence_matrix:
+  - criterion_id: <id>
+    evidence_type: test | runtime | git | contract | human
+    evidence_ref: <test_id/operation_id/commit/path>
+    semantic_assertion: <o que foi realmente provado>
+    satisfied: true | false
+```
+Todos os critérios obrigatórios devem estar `satisfied=true` antes do fechamento. Proxies fracos são inválidos: `enemy visible != actor agiu`, `action string != non-WAIT`, `execute_cast()==true != efeito mecânico real`.
+
+### Estado de entrega da fase
+Não altere o significado interno de `COMPLETED`, mas adicione ao checkpoint/relatório:
+```yaml
+delivery_state:
+  integration_branch_completed: false
+  integration_source_branch: <integration_target_branch>
+  integration_source_head: <hash>
+  main_head_observed: <hash|null>
+  main_integration_pending: false
+  main_integrated: false
+  push_performed: false
+```
+Se `integration_target_branch != main`, o fechamento do recorte deve registrar `integration_branch_completed=true`, `main_integration_pending=true`, `main_integrated=false`. Merge local para `main` e push remoto são eventos distintos.
+

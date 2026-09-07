@@ -12,6 +12,7 @@ task_budget:
 progress:
   compare_git_head: true
   compare_git_status: true
+  git_snapshot_timeout_seconds: 30
   human_required_when_no_material_progress: true
 provider_circuit:
   terminal_error_types:
