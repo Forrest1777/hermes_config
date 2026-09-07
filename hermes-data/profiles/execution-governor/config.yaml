@@ -4,8 +4,6 @@ model:
   base_url: https://api.groq.com/openai/v1
   api_key: ${HERMES_CUSTOM_API_GROQ_COM_API_KEY}
   max_tokens: 128
-# Post AI-COMBAT: keep the tiny Groq Governor as primary, but avoid
-# making recovery depend on one secondary provider being available.
 fallback_model:
   provider: openai-codex
   model: gpt-5.6-terra
@@ -14,7 +12,7 @@ agent:
   tool_use_enforcement: true
   reasoning_effort: low
   disabled_toolsets:
-  - kanban
+    - kanban
 terminal:
   cwd: /opt/data/profiles/execution-governor
 compression:
@@ -22,62 +20,56 @@ compression:
 memory:
   memory_enabled: false
   user_profile_enabled: false
-_config_version: 37
+_config_version: 41
 custom_providers:
-- name: openai/gpt-oss-20b
-  base_url: https://api.groq.com/openai/v1
-  key_env: HERMES_CUSTOM_API_GROQ_COM_API_KEY
-  model: openai/gpt-oss-20b
-  models:
-    openai/gpt-oss-20b:
-      context_length: 131072
+  - name: openai/gpt-oss-20b
+    base_url: https://api.groq.com/openai/v1
+    key_env: HERMES_CUSTOM_API_GROQ_COM_API_KEY
+    model: openai/gpt-oss-20b
+    models:
+      openai/gpt-oss-20b:
+        context_length: 131072
 platform_toolsets:
   cli:
-  - execution_governance
+    - execution_governance
 tools:
   tool_search:
     enabled: 'off'
 plugins:
   enabled:
-  - execution-governance
-  - governance-guard
+    - execution-governance
+    - governance-guard
   disabled: []
-  entries:
-    governance-guard:
-      allow_tool_override: false
-    execution-governance:
-      allow_tool_override: false
 known_plugin_toolsets:
   cli:
-  - a2a
-  - spotify
-  - execution_governance
+    - a2a
+    - spotify
+    - execution_governance
 known_builtin_toolsets:
   cli:
-  - bfl
-  - browser
-  - clarify
-  - code_execution
-  - computer_use
-  - context_engine
-  - cronjob
-  - delegation
-  - discord
-  - discord_admin
-  - file
-  - homeassistant
-  - image_gen
-  - memory
-  - session_search
-  - skills
-  - spotify
-  - stt
-  - terminal
-  - todo
-  - tts
-  - video
-  - video_gen
-  - vision
-  - web
-  - x_search
-  - yuanbao
+    - browser
+    - clarify
+    - code_execution
+    - computer_use
+    - context_engine
+    - cronjob
+    - delegation
+    - discord
+    - discord_admin
+    - file
+    - homeassistant
+    - image_gen
+    - memory
+    - session_search
+    - skills
+    - spotify
+    - stt
+    - terminal
+    - todo
+    - tts
+    - video
+    - video_gen
+    - vision
+    - web
+    - x_search
+    - yuanbao

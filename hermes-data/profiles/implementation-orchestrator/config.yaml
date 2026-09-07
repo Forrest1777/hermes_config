@@ -1,5 +1,4 @@
 model:
-  #default: gpt-5.6-sol
   default: gpt-6-astra
   provider: openai-codex
   base_url: https://chatgpt.com/backend-api/codex
@@ -92,7 +91,7 @@ display:
   busy_input_mode: interrupt
   bell_on_complete: false
   show_reasoning: false
-  background_process_notifications: all
+  background_process_notifications: concise
   streaming: true
   skin: default
   interim_assistant_messages: true
@@ -144,7 +143,7 @@ lsp:
         GODOT_LSP_CONTAINER_ROOT: /workspace
         GODOT_LSP_HOST_ROOT: E:/dev/ai_agents/hermes/workspace
         GODOT_LSP_CONNECT_TIMEOUT: '10'
-_config_version: 33
+_config_version: 41
 worktree_guardian:
   holding_assignee: __worktree_guardian_hold__
   workspace_root: /workspace
@@ -218,23 +217,6 @@ plugins:
     - worktree-guardian
     - gwrm-gut-runner
   disabled: []
-  entries:
-    godot-lsp:
-      allow_tool_override: true
-    rtk-rewrite:
-      allow_tool_override: true
-    governance-guard:
-      allow_tool_override: false
-    orchestration-control:
-      allow_tool_override: false
-    worktree-guardian:
-      allow_tool_override: false
-    gwrm-lifecycle-cleanup:
-      allow_tool_override: false
-    operational-block-completion-guard:
-      allow_tool_override: false
-    gwrm-gut-runner:
-      allow_tool_override: false
 image_gen:
   provider: openai-codex
   use_gateway: false
@@ -266,41 +248,3 @@ mcp_servers:
         - get_worktree_status
       resources: false
       prompts: false
-
-# ── Security ──────────────────────────────────────────────────────────
-# Secret redaction is ON by default — strings that look like API keys,
-# tokens, and passwords are masked in tool output, logs, and chat
-# responses before the model or user ever sees them. Set redact_secrets
-# to false to disable (e.g. when developing the redactor itself).
-# tirith pre-exec scanning is enabled by default when the tirith binary
-# is available. Configure via security.tirith_* keys or env vars
-# (TIRITH_ENABLED, TIRITH_BIN, TIRITH_TIMEOUT, TIRITH_FAIL_OPEN).
-#
-# security:
-#   redact_secrets: true
-#   tirith_enabled: true
-#   tirith_path: "tirith"
-#   tirith_timeout: 5
-#   tirith_fail_open: true
-
-# ── Fallback Model ────────────────────────────────────────────────────
-# Automatic provider failover when primary is unavailable.
-# Uncomment and configure to enable. Triggers on rate limits (429),
-# overload (529), service errors (503), or connection failures.
-#
-# Supported providers:
-#   openrouter   (OPENROUTER_API_KEY)  — routes to any model
-#   openai-codex (OAuth — hermes auth) — OpenAI Codex
-#   nous         (OAuth — hermes auth) — Nous Portal
-#   zai          (ZAI_API_KEY)         — Z.AI / GLM
-#   kimi-coding  (KIMI_API_KEY)        — Kimi / Moonshot
-#   kimi-coding-cn (KIMI_CN_API_KEY)   — Kimi / Moonshot (China)
-#   minimax      (MINIMAX_API_KEY)     — MiniMax
-#   minimax-cn   (MINIMAX_CN_API_KEY)  — MiniMax (China)
-#   bedrock      (AWS IAM / boto3)     — AWS Bedrock (Converse API)
-#
-# For custom OpenAI-compatible endpoints, add base_url and key_env.
-#
-# fallback_model:
-#   provider: openrouter
-#   model: anthropic/claude-sonnet-4

@@ -1,6 +1,5 @@
 model:
   default: gpt-5.6-sol
-  #default: gpt-6-astra
   provider: openai-codex
   base_url: https://chatgpt.com/backend-api/codex
 agent:
@@ -94,7 +93,7 @@ display:
   busy_input_mode: interrupt
   bell_on_complete: false
   show_reasoning: false
-  background_process_notifications: all
+  background_process_notifications: concise
   streaming: true
   skin: default
   interim_assistant_messages: true
@@ -147,7 +146,7 @@ lsp:
         GODOT_LSP_CONTAINER_ROOT: /workspace
         GODOT_LSP_HOST_ROOT: E:/dev/ai_agents/hermes/workspace
         GODOT_LSP_CONNECT_TIMEOUT: '10'
-_config_version: 33
+_config_version: 41
 worktree_guardian:
   holding_assignee: __worktree_guardian_hold__
   workspace_root: /workspace
@@ -219,19 +218,6 @@ plugins:
     - worktree-guardian
     - post-ai-combat-hardening
   disabled: []
-  entries:
-    godot-lsp:
-      allow_tool_override: true
-    rtk-rewrite:
-      allow_tool_override: true
-    governance-guard:
-      allow_tool_override: false
-    worktree-guardian:
-      allow_tool_override: false
-    gwrm-lifecycle-cleanup:
-      allow_tool_override: false
-    operational-block-completion-guard:
-      allow_tool_override: false
 image_gen:
   provider: openai-codex
   use_gateway: false
