@@ -359,3 +359,6 @@
 /hermes-data/bin/graphify
 /hermes-data/bin/graphify-mcp
 /hermes-data/skills/graphify/
+
+# Desconsiderando operational-hardening
+/hermes-data/operational-hardening/
