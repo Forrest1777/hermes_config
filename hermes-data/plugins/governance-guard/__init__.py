@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+# HERMES_GOVERNANCE_GUARD_GLOBAL_KANBAN_CONNECT_2026_09_08
+from hermes_cli.kanban_db_connect import connect as _kanban_connect
 
 logger = logging.getLogger("governance-guard")
 
@@ -553,6 +555,7 @@ def _api_request_error(provider=None, model=None, status_code=None, retry_count=
         "reason": str(reason) if reason is not None else None,
         "error": str(error)[:1200] if error is not None else None,
         "observed_at": _utc_now(),
+        "active": True,
     }
     state_error = None
     if rid:
@@ -810,8 +813,6 @@ def _hold_task(ctx, task_id: str, board: str | None, reason: str, kind: str) -> 
         return {"ok": False, "skipped": "global_kanban_override_conflict", "board": effective_board, **conflict}
     try:
         from hermes_cli import kanban_db as kb
-        # HERMES_V021_KANBAN_CONNECT_2026_09_07
-        from hermes_cli.kanban_db_connect import connect as _kanban_connect
         conn = _kanban_connect(board=effective_board)
         try:
             task = kb.get_task(conn, task_id)
@@ -1121,8 +1122,8 @@ def _request_dirty_checkpoint_recovery(args: dict, **kwargs) -> str:
             "target_status": target_status,
             "checkpoint": checkpoint,
             "governor": ensured,
-            "retry_authorized": False,
-            "target_reactivated": False,
+            "retry_authorized": bool(ensured.get("decision") == "RETRY_AUTHORIZED" and ensured.get("applied")),
+            "target_reactivated": bool(ensured.get("decision") == "RETRY_AUTHORIZED" and ensured.get("applied")),
         }, ensure_ascii=False)
     except GovernanceStateError as exc:
         _append_event("dirty_checkpoint_recovery_request_failed", root_task_id=root_id, task_id=target_id, fail_closed=True, error=str(exc)[:1000])
@@ -1139,6 +1140,167 @@ _DIRTY_RECOVERY_LAST_CATCHUP_MONOTONIC = 0.0
 def _dirty_recovery_cfg(policy: dict[str, Any]) -> dict[str, Any]:
     value = policy.get("dirty_checkpoint_recovery") or {}
     return value if isinstance(value, dict) else {}
+
+
+
+# HERMES_TERMINAL_DIRTY_RECOVERY_REQUEUE_2026_09_08
+def _requeue_existing_authorized_dirty_recovery(
+    task_id: str,
+    case_id: str,
+    board: str | None,
+    checkpoint: dict[str, Any],
+    task_state: dict[str, Any],
+) -> dict[str, Any]:
+    auth = task_state.get("authorized_recovery_checkpoint")
+    if not isinstance(auth, dict):
+        return {"ok": True, "eligible": False, "reason": "authorization_missing"}
+    if str(auth.get("state") or "") != "AUTHORIZED":
+        return {
+            "ok": True,
+            "eligible": False,
+            "reason": "authorization_not_authorized",
+            "state": auth.get("state"),
+        }
+    if str(auth.get("reason") or "") != "dirty_checkpoint_recovery":
+        return {"ok": True, "eligible": False, "reason": "authorization_reason_mismatch"}
+    if str(auth.get("case_id") or "") != str(case_id or ""):
+        return {"ok": True, "eligible": False, "reason": "authorization_case_mismatch"}
+    if int(auth.get("expires_at") or 0) < int(time.time()):
+        return {"ok": True, "eligible": False, "reason": "authorization_expired"}
+
+    expected_workspace = str(Path(str(auth.get("workspace") or "")).resolve(strict=False))
+    live_workspace = str(Path(str(checkpoint.get("path") or "")).resolve(strict=False))
+    if not expected_workspace or expected_workspace != live_workspace:
+        return {"ok": True, "eligible": False, "reason": "authorization_workspace_mismatch"}
+    if str(auth.get("head") or "") != str(checkpoint.get("head") or ""):
+        return {"ok": True, "eligible": False, "reason": "authorization_head_mismatch"}
+    if str(auth.get("status_sha256") or "") != str(checkpoint.get("status_sha256") or ""):
+        return {"ok": True, "eligible": False, "reason": "authorization_status_mismatch"}
+
+    resume_epoch = int(auth.get("resume_epoch") or 0)
+    if resume_epoch <= 0:
+        return {"ok": True, "eligible": False, "reason": "authorization_resume_epoch_missing"}
+
+    effective_board = _normalized_board(board)
+    try:
+        from hermes_cli import kanban_db as kb
+        conn = _kanban_connect(board=effective_board)
+        try:
+            task = kb.get_task(conn, task_id)
+            if task is None:
+                return {"ok": False, "eligible": True, "error": "task_not_found"}
+
+            task_status = str(getattr(task, "status", "") or "")
+            if task_status != "triage":
+                return {
+                    "ok": True,
+                    "eligible": False,
+                    "reason": "task_not_triage",
+                    "status": task_status,
+                }
+            if getattr(task, "current_run_id", None) is not None:
+                return {"ok": True, "eligible": False, "reason": "task_still_running"}
+
+            now = int(time.time())
+            status_payload = json.dumps(
+                {
+                    "status": "ready",
+                    "from": "triage",
+                    "reason": f"REARMED RETRY_AUTHORIZED case {case_id}",
+                    "source": "governance-guard-rearm",
+                    "resume_epoch": resume_epoch,
+                },
+                ensure_ascii=False,
+            )
+
+            sql = (
+                "UPDATE tasks "
+                "SET status='ready', "
+                "completed_at=NULL, "
+                "claim_lock=NULL, "
+                "claim_expires=NULL, "
+                "worker_pid=NULL, "
+                "current_run_id=NULL "
+                "WHERE id=? "
+                "AND status='triage' "
+                "AND current_run_id IS NULL"
+            )
+
+            with kb.write_txn(conn):
+                cur = conn.execute(sql, (task_id,))
+                if cur.rowcount != 1:
+                    return {
+                        "ok": False,
+                        "eligible": True,
+                        "error": "dirty_recovery_requeue_cas_lost",
+                    }
+
+                conn.execute(
+                    "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+                    "VALUES (?, NULL, 'status', ?, ?)",
+                    (task_id, status_payload, now),
+                )
+                conn.execute(
+                    "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+                    "VALUES (?, NULL, 'governance_recovery_requeued', ?, ?)",
+                    (task_id, status_payload, now),
+                )
+
+            try:
+                kb.notify_task_updated(
+                    conn,
+                    task_id,
+                    [
+                        "status",
+                        "completed_at",
+                        "claim_lock",
+                        "claim_expires",
+                        "worker_pid",
+                        "current_run_id",
+                    ],
+                    board=effective_board,
+                )
+            except Exception:
+                pass
+
+            kb.add_comment(
+                conn,
+                task_id,
+                author="execution-governor",
+                body=(
+                    f"RETRY_AUTHORIZED lease rearmed. Case {case_id}. "
+                    f"Resume epoch {resume_epoch}. Recovered from triage under "
+                    "the existing exact dirty-checkpoint authorization; "
+                    "no new governance decision."
+                ),
+            )
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "eligible": True,
+            "error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+
+    _append_event(
+        "dirty_checkpoint_recovery_existing_authorization_requeued",
+        task_id=task_id,
+        case_id=case_id,
+        board=effective_board,
+        resume_epoch=resume_epoch,
+        workspace=checkpoint.get("path"),
+        head=checkpoint.get("head"),
+        status_sha256=checkpoint.get("status_sha256"),
+    )
+    return {
+        "ok": True,
+        "eligible": True,
+        "requeued": True,
+        "task_id": task_id,
+        "case_id": case_id,
+        "resume_epoch": resume_epoch,
+    }
 
 
 def _ensure_dirty_recovery_case_for_task(
@@ -1221,6 +1383,36 @@ def _ensure_dirty_recovery_case_for_task(
                     "checkpoint": checkpoint,
                     "governor": ensured,
                 }
+            if existing_status == "RETRY_AUTHORIZED":
+                requeued = _requeue_existing_authorized_dirty_recovery(
+                    tid,
+                    case_id,
+                    effective_board,
+                    checkpoint,
+                    target_state,
+                )
+                if requeued.get("requeued"):
+                    return {
+                        "ok": True,
+                        "case_id": case_id,
+                        "reused": True,
+                        "terminal": True,
+                        "case_status": existing_status,
+                        "checkpoint": checkpoint,
+                        "existing_authorization_requeued": True,
+                        "requeue": requeued,
+                    }
+                if requeued.get("eligible") is False:
+                    return {
+                        "ok": True,
+                        "case_id": case_id,
+                        "reused": True,
+                        "terminal": True,
+                        "case_status": existing_status,
+                        "checkpoint": checkpoint,
+                        "existing_authorization_requeued": False,
+                        "requeue": requeued,
+                    }
             return {
                 "ok": True,
                 "case_id": case_id,
@@ -1308,8 +1500,8 @@ def _ensure_dirty_recovery_case_for_task(
             "created": True,
             "checkpoint": checkpoint,
             "governor": ensured,
-            "retry_authorized": False,
-            "target_reactivated": False,
+            "retry_authorized": bool(ensured.get("decision") == "RETRY_AUTHORIZED" and ensured.get("applied")),
+            "target_reactivated": bool(ensured.get("decision") == "RETRY_AUTHORIZED" and ensured.get("applied")),
         }
     except GovernanceStateError as exc:
         _append_event(
@@ -1802,6 +1994,261 @@ def _reconcile_error_governor(board: str, policy: dict[str, Any]) -> dict[str, A
     _append_event("execution_governor_stale_reconciled", **result)
     return result
 
+
+# HERMES_DETERMINISTIC_GOVERNOR_TODO7_2026_09_08
+_DETERMINISTIC_NONRETRYABLE_REASONS = {
+    "model_not_found",
+    "invalid_request",
+    "payload_too_large",
+}
+
+_DETERMINISTIC_TRANSIENT_REASONS = {
+    "transient",
+    "timeout",
+    "timed_out",
+    "network_error",
+    "connection_error",
+    "service_unavailable",
+    "server_error",
+    "gateway_error",
+}
+
+_DETERMINISTIC_TRANSIENT_EXIT_KINDS = {
+    "timed_out",
+    "timeout",
+    "synthetic_transient",
+}
+
+
+def _deterministic_governance_decision(
+    case: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    """Classify only cases whose outcome is objective; everything else stays LLM fallback."""
+    total = int(case.get("total_attempts") or 0)
+    maximum = int(
+        case.get("max_total_attempts")
+        or ((policy.get("task_budget") or {}).get("default_max_total_attempts"))
+        or 2
+    )
+    progress = case.get("progress") or {}
+    material_progress = progress.get("material_progress")
+    last_error = case.get("last_api_error") or {}
+    error_reason = str(last_error.get("reason") or "").strip().lower()
+    exit_info = case.get("exit") or {}
+    exit_kind = str(exit_info.get("kind") or "").strip().lower()
+    outcome = str(exit_info.get("outcome") or "").strip().lower()
+    case_type = str(case.get("case_type") or "").strip().upper()
+    circuit = case.get("provider_circuit") or {}
+
+    if isinstance(circuit, dict) and str(circuit.get("state") or "").upper() == "OPEN":
+        return {
+            "decision": "AMBIGUOUS",
+            "reason": "provider_circuit_open_managed_by_provider_recovery",
+            "deterministic": False,
+        }
+
+    if total >= maximum:
+        return {
+            "decision": "HUMAN_REQUIRED",
+            "reason": f"attempt_budget_exhausted:{total}/{maximum}",
+            "deterministic": True,
+        }
+
+    if (
+        material_progress is False
+        and (policy.get("progress") or {}).get("human_required_when_no_material_progress", True)
+    ):
+        return {
+            "decision": "HUMAN_REQUIRED",
+            "reason": "no_material_progress",
+            "deterministic": True,
+        }
+
+    if error_reason in _DETERMINISTIC_NONRETRYABLE_REASONS:
+        return {
+            "decision": "HUMAN_REQUIRED",
+            "reason": f"nonretryable_provider_or_configuration_error:{error_reason}",
+            "deterministic": True,
+        }
+
+    if case_type == "DIRTY_CHECKPOINT_RECOVERY":
+        recovery_request = case.get("recovery_request") or {}
+        if not isinstance(recovery_request, dict) or recovery_request.get("validated") is not True:
+            return {
+                "decision": "HUMAN_REQUIRED",
+                "reason": "dirty_checkpoint_recovery_not_validated",
+                "deterministic": True,
+            }
+        return {
+            "decision": "RETRY_AUTHORIZED",
+            "reason": "validated_dirty_checkpoint_recovery",
+            "deterministic": True,
+        }
+
+    status_code = last_error.get("status_code")
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+
+    if exit_kind in _DETERMINISTIC_TRANSIENT_EXIT_KINDS or outcome in {"timed_out", "timeout"}:
+        return {
+            "decision": "RETRY_AUTHORIZED",
+            "reason": f"transient_exit:{exit_kind or outcome}",
+            "deterministic": True,
+        }
+
+    if error_reason in _DETERMINISTIC_TRANSIENT_REASONS:
+        return {
+            "decision": "RETRY_AUTHORIZED",
+            "reason": f"transient_provider_error:{error_reason}",
+            "deterministic": True,
+        }
+
+    if status_code is not None and 500 <= status_code <= 599:
+        return {
+            "decision": "RETRY_AUTHORIZED",
+            "reason": f"transient_http_status:{status_code}",
+            "deterministic": True,
+        }
+
+    return {
+        "decision": "AMBIGUOUS",
+        "reason": "no_safe_deterministic_rule",
+        "deterministic": False,
+    }
+
+
+def _loaded_execution_governance_module():
+    """Return the execution-governance module loaded in this profile, or None."""
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+        manager = get_plugin_manager()
+        loaded = (getattr(manager, "_plugins", {}) or {}).get("execution-governance")
+        if loaded is None or not getattr(loaded, "enabled", False):
+            return None
+        module = getattr(loaded, "module", None)
+        if module is None or not callable(getattr(module, "governance_decide", None)):
+            return None
+        return module
+    except Exception:
+        return None
+
+
+def _call_execution_governance_decide(
+    case: dict[str, Any],
+    decision: str,
+    rationale: str,
+) -> dict[str, Any] | None:
+    """Apply through the existing execution-governance source of truth."""
+    module = _loaded_execution_governance_module()
+    if module is None:
+        return None
+
+    token = None
+    try:
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+        canonical_home = _governance_dir().parent
+        token = set_hermes_home_override(canonical_home)
+        raw = module.governance_decide(
+            {
+                "case_id": str(case.get("case_id") or ""),
+                "decision": decision,
+                "rationale": rationale,
+            }
+        )
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = {"ok": False, "error": "execution-governance returned non-JSON"}
+        elif isinstance(raw, dict):
+            parsed = raw
+        else:
+            parsed = {
+                "ok": False,
+                "error": f"unexpected execution-governance result:{type(raw).__name__}",
+            }
+        return parsed
+    except Exception as exc:
+        _append_event(
+            "governance_deterministic_apply_failed",
+            case_id=case.get("case_id"),
+            task_id=case.get("task_id"),
+            error=f"{type(exc).__name__}: {exc}"[:1000],
+        )
+        return None
+    finally:
+        if token is not None:
+            try:
+                reset_hermes_home_override(token)
+            except Exception:
+                pass
+
+
+def _try_deterministic_governance(
+    case: dict[str, Any],
+    board: str | None,
+    policy: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return a terminal routing result, or None for the existing LLM fallback."""
+    classified = _deterministic_governance_decision(case, policy)
+    decision = str(classified.get("decision") or "AMBIGUOUS").upper()
+    rationale = str(classified.get("reason") or "no_reason")
+
+    if decision == "AMBIGUOUS":
+        _append_event(
+            "governance_deterministic_fallback",
+            case_id=case.get("case_id"),
+            task_id=case.get("task_id"),
+            board=_normalized_board(board),
+            reason=rationale,
+        )
+        return None
+
+    actions = policy.get("kanban_actions") or {}
+    if not _enforcement_allowed(actions, board, case.get("tenant")):
+        result = {
+            "ok": True,
+            "method": "deterministic_observe",
+            "deterministic": True,
+            "applied": False,
+            "decision": decision,
+            "rationale": rationale,
+            "case_id": case.get("case_id"),
+            "task_id": case.get("task_id"),
+            "board": _normalized_board(board),
+        }
+        _append_event("governance_deterministic_observed", **result)
+        return result
+
+    applied = _call_execution_governance_decide(case, decision, rationale)
+    if not isinstance(applied, dict) or applied.get("ok") is not True:
+        _append_event(
+            "governance_deterministic_apply_unavailable_fallback",
+            case_id=case.get("case_id"),
+            task_id=case.get("task_id"),
+            board=_normalized_board(board),
+            decision=decision,
+            rationale=rationale,
+            apply_result=applied,
+        )
+        return None
+
+    result = {
+        **applied,
+        "method": "deterministic_direct",
+        "deterministic": True,
+        "applied": True,
+        "decision": decision,
+        "rationale": rationale,
+        "board": _normalized_board(board),
+    }
+    _append_event("governance_deterministic_applied", **result)
+    return result
+
 def _ensure_board_governor(
     ctx,
     case: dict[str, Any],
@@ -1822,6 +2269,9 @@ def _ensure_board_governor(
         }
 
     effective_board = _normalized_board(board)
+    deterministic = _try_deterministic_governance(case, effective_board, policy)
+    if deterministic is not None:
+        return deterministic
     reconciliation = _reconcile_error_governor(effective_board, policy)
     if not reconciliation.get("ok"):
         return {
@@ -2613,6 +3063,98 @@ def _kanban_task_completed(task_id=None, run_id=None, assignee=None, **kwargs):
     _append_event("task_completed", task_id=tid, run_id=run_id, assignee=assignee)
 
 
+
+# HERMES_DIRTY_RECOVERY_LEASE_REARM_2026_09_08
+def _rearm_dirty_recovery_lease_after_block(task_id: str, run_id: Any) -> dict[str, Any]:
+    # Re-arm only an unchanged dirty-checkpoint lease claimed by this exact run.
+    tid = str(task_id or "").strip()
+    rid = str(run_id) if run_id is not None else ""
+    if not tid or not rid:
+        return {"ok": False, "skipped": "missing_task_or_run"}
+
+    holder: dict[str, Any] = {}
+
+    try:
+        with _file_lock(_state_path()):
+            snapshot = _read_state_unlocked()
+        task = (snapshot.get("tasks") or {}).get(tid)
+        if not isinstance(task, dict):
+            return {"ok": False, "skipped": "task_ledger_missing"}
+        auth = task.get("authorized_recovery_checkpoint")
+        if not isinstance(auth, dict):
+            return {"ok": False, "skipped": "authorization_missing"}
+        if str(auth.get("reason") or "") != "dirty_checkpoint_recovery":
+            return {"ok": False, "skipped": "not_dirty_checkpoint_recovery"}
+        if str(auth.get("state") or "") != "IN_USE":
+            return {"ok": False, "skipped": "authorization_not_in_use", "state": auth.get("state")}
+        if str(auth.get("run_id") or "") != rid:
+            return {"ok": False, "skipped": "authorization_owned_by_other_run", "owner_run_id": auth.get("run_id")}
+        if int(auth.get("expires_at") or 0) < int(time.time()):
+            return {"ok": False, "skipped": "authorization_expired"}
+
+        workspace = str(auth.get("workspace") or "").strip()
+        current = _git_snapshot(workspace)
+        if not current.get("available"):
+            return {"ok": False, "skipped": "checkpoint_snapshot_unavailable"}
+
+        expected_head = str(auth.get("head") or "")
+        expected_status = str(auth.get("status_sha256") or "")
+        if str(current.get("head") or "") != expected_head:
+            return {"ok": False, "skipped": "checkpoint_head_changed"}
+        if str(current.get("status_sha256") or "") != expected_status:
+            return {"ok": False, "skipped": "checkpoint_status_changed"}
+
+        def mutate(state):
+            task2 = (state.get("tasks") or {}).get(tid)
+            if not isinstance(task2, dict):
+                return
+            auth2 = task2.get("authorized_recovery_checkpoint")
+            if not isinstance(auth2, dict):
+                return
+            if str(auth2.get("reason") or "") != "dirty_checkpoint_recovery":
+                return
+            if str(auth2.get("state") or "") != "IN_USE":
+                return
+            if str(auth2.get("run_id") or "") != rid:
+                return
+            if str(auth2.get("head") or "") != expected_head:
+                return
+            if str(auth2.get("status_sha256") or "") != expected_status:
+                return
+            auth2["state"] = "AUTHORIZED"
+            auth2["rearmed_at"] = _utc_now()
+            auth2["rearmed_from_run_id"] = rid
+            auth2.pop("run_id", None)
+            auth2.pop("claimed_at", None)
+            holder["rearmed"] = True
+            holder["resume_epoch"] = auth2.get("resume_epoch")
+            holder["case_id"] = auth2.get("case_id")
+
+        _update_state(mutate)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:1000]}
+
+    if not holder.get("rearmed"):
+        return {"ok": False, "skipped": "compare_and_swap_refused"}
+
+    _append_event(
+        "dirty_checkpoint_recovery_lease_rearmed",
+        task_id=tid,
+        run_id=run_id,
+        case_id=holder.get("case_id"),
+        resume_epoch=holder.get("resume_epoch"),
+        reason="blocked_run_left_authorized_checkpoint_unchanged",
+    )
+    return {
+        "ok": True,
+        "rearmed": True,
+        "task_id": tid,
+        "run_id": rid,
+        "case_id": holder.get("case_id"),
+        "resume_epoch": holder.get("resume_epoch"),
+    }
+
+
 def _kanban_task_blocked(task_id=None, run_id=None, assignee=None, reason=None, board=None, **kwargs):
     del kwargs
     if not task_id:
@@ -2620,6 +3162,16 @@ def _kanban_task_blocked(task_id=None, run_id=None, assignee=None, reason=None, 
     reason_text = str(reason or "")
     _append_event("task_blocked", task_id=str(task_id), run_id=run_id,
                   assignee=assignee, reason=reason_text[:2000] if reason_text else None)
+
+    rearm_result = _rearm_dirty_recovery_lease_after_block(str(task_id), run_id)
+    if rearm_result.get("rearmed"):
+        _append_event(
+            "dirty_checkpoint_recovery_block_rearm",
+            task_id=str(task_id),
+            run_id=run_id,
+            result=rearm_result,
+        )
+
 
     # Canonical event-driven recovery trigger. Match only our deterministic
     # retry-checkpoint-guard reason; ordinary human/dependency blocks never
@@ -2641,6 +3193,785 @@ def _kanban_task_blocked(task_id=None, run_id=None, assignee=None, reason=None, 
         )
 
 
+
+
+# HERMES_PROVIDER_EXIT_RECLASSIFICATION_2026_09_07
+_PROVIDER_EXIT_RECLASSIFIER_ORIGINAL = None
+
+
+def _provider_error_status_code(error: dict[str, Any]) -> int | None:
+    try:
+        raw = error.get("status_code")
+        return int(raw) if raw is not None and str(raw).strip() else None
+    except Exception:
+        return None
+
+
+def _active_provider_error_for_pid(pid: int) -> dict[str, Any] | None:
+    """Return one unresolved provider error for the one live governance run owning pid.
+
+    PID reuse is handled by requiring the matching governance run to still be open
+    (no ended_at). Ambiguous matches fail closed to native Hermes behavior.
+    """
+    try:
+        path = _state_path()
+        with _file_lock(path):
+            state = _read_state_unlocked()
+    except Exception:
+        return None
+
+    matches: list[dict[str, Any]] = []
+    for task_id, task in (state.get("tasks") or {}).items():
+        if not isinstance(task, dict):
+            continue
+        for run_key, run in (task.get("runs") or {}).items():
+            if not isinstance(run, dict):
+                continue
+            try:
+                worker_pid = int(run.get("worker_pid"))
+            except Exception:
+                continue
+            if worker_pid != int(pid) or run.get("ended_at"):
+                continue
+            error = run.get("last_api_error")
+            if not isinstance(error, dict) or error.get("active") is not True:
+                continue
+            matches.append({
+                "task_id": str(task_id),
+                "run_id": str(run.get("run_id") if run.get("run_id") is not None else run_key),
+                "error": dict(error),
+            })
+
+    return matches[0] if len(matches) == 1 else None
+
+
+def _provider_error_is_rate_or_budget(error: dict[str, Any]) -> bool:
+    status = _provider_error_status_code(error)
+    reason = str(error.get("reason") or "").strip().lower()
+    text = str(error.get("error") or "").strip().lower()
+    if status == 429:
+        return True
+    if any(token in reason for token in ("rate_limit", "ratelimit", "billing", "quota")):
+        return True
+    return any(token in text for token in (
+        "rate limit", "rate_limit", "too many requests", "quota", "usage limit",
+        "usage_limit", "billing hard limit", "insufficient_quota",
+    ))
+
+
+def _provider_aware_dead_worker(pid: int, claimer: str | None):
+    native = _PROVIDER_EXIT_RECLASSIFIER_ORIGINAL(pid, claimer)
+    if str(getattr(native, "kind", "") or "") != "clean_exit":
+        return native
+
+    evidence = _active_provider_error_for_pid(pid)
+    if not evidence:
+        return native
+
+    error = evidence["error"]
+    task_id = evidence["task_id"]
+    run_id = evidence["run_id"]
+    status = _provider_error_status_code(error)
+    reason = str(error.get("reason") or "unknown")
+    provider = str(error.get("provider") or "unknown")
+    model = str(error.get("model") or "")
+
+    import importlib
+    kbd = importlib.import_module("hermes_cli.kanban_db_dispatch")
+    payload = {
+        "pid": int(pid),
+        "claimer": claimer,
+        "exit_code": getattr(native, "code", None),
+        "provider_error_reclassified": True,
+        "provider": provider,
+        "model": model or None,
+        "provider_reason": reason,
+        "status_code": status,
+        "governance_task_id": task_id,
+        "governance_run_id": run_id,
+    }
+
+    if _provider_error_is_rate_or_budget(error):
+        return kbd._DeadWorker(
+            "rate_limited",
+            getattr(native, "code", None),
+            (
+                f"pid {pid} exited after unresolved provider rate/quota error "
+                f"({provider}, status={status}, reason={reason}) - requeued without protocol violation"
+            ),
+            "rate_limited",
+            payload,
+            protocol_violation=False,
+            rate_limited=True,
+        )
+
+    return kbd._DeadWorker(
+        "provider_error",
+        getattr(native, "code", None),
+        (
+            f"pid {pid} exited after unresolved provider API error "
+            f"({provider}, status={status}, reason={reason})"
+        ),
+        "provider_error",
+        payload,
+        protocol_violation=False,
+        rate_limited=False,
+    )
+
+
+_provider_aware_dead_worker._governance_provider_exit_reclassifier = True
+
+
+def _install_provider_exit_reclassification() -> None:
+    global _PROVIDER_EXIT_RECLASSIFIER_ORIGINAL
+    import importlib
+    kbd = importlib.import_module("hermes_cli.kanban_db_dispatch")
+    current = kbd._classify_dead_worker
+
+    if getattr(current, "_governance_provider_exit_reclassifier", False):
+        original = getattr(current, "_governance_provider_exit_original", None)
+        if original is not None:
+            _PROVIDER_EXIT_RECLASSIFIER_ORIGINAL = original
+        return
+
+    _PROVIDER_EXIT_RECLASSIFIER_ORIGINAL = current
+    _provider_aware_dead_worker._governance_provider_exit_original = current
+    kbd._classify_dead_worker = _provider_aware_dead_worker
+    _append_event("provider_exit_reclassifier_installed")
+
+
+def _post_api_request_success(provider=None, model=None, **kwargs):
+    """A successful API call resolves a prior API error in this same Kanban run."""
+    del provider, model, kwargs
+    tid = _task_id()
+    rid = str(_run_id() or "")
+    if not tid or not rid:
+        return
+    profile = os.environ.get("HERMES_PROFILE")
+    if not _profile_governed(profile):
+        return
+
+    def mutate(state):
+        task = (state.get("tasks") or {}).get(str(tid))
+        if not isinstance(task, dict):
+            return
+        run = (task.get("runs") or {}).get(rid)
+        if not isinstance(run, dict):
+            return
+        now = _utc_now()
+        run["last_api_success_at"] = now
+        error = run.get("last_api_error")
+        if isinstance(error, dict) and error.get("active") is True:
+            error["active"] = False
+            error["recovered_at"] = now
+
+    try:
+        _update_state(mutate)
+    except GovernanceStateError as exc:
+        _append_event(
+            "governance_state_unavailable",
+            task_id=tid,
+            run_id=_run_id(),
+            profile=profile,
+            fail_closed=True,
+            error=str(exc)[:1000],
+            source="post_api_request",
+        )
+
+# HERMES_ATTEMPTS_EXHAUSTED_RECOVERY_2026_09_07
+EXHAUSTED_RECOVERY_SCHEMA = {
+    "name": "execute_exhausted_recovery_transaction",
+    "description": (
+        "Materialize one governed replacement for a related dirty-checkpoint recovery case "
+        "whose attempt budget is exhausted. Requires an exact dashboard human authorization "
+        "comment and performs a crash-resumable recovery checkpoint + atomic Kanban relink."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "target_task_id": {"type": "string", "description": "Blocked/triage exhausted child task id."},
+            "case_id": {"type": "string", "description": "DIRTY_CHECKPOINT_RECOVERY case id in HUMAN_REQUIRED state."},
+            "reason": {"type": "string", "description": "Short audit reason for materializing the replacement."},
+        },
+        "required": ["target_task_id", "case_id", "reason"],
+        "additionalProperties": False,
+    },
+}
+
+_EXHAUSTED_AUTH_MARKER = "HUMAN_AUTHORIZATION_EXHAUSTED_RECOVERY"
+_EXHAUSTED_SIGNED_MARKER = "GOVERNANCE_RECOVERY_REPLACEMENT_AUTHORIZED"
+_EXHAUSTED_HOLD_ASSIGNEE = "__worktree_guardian_hold__"
+
+
+def _recovery_scalar(body: str, key: str) -> str:
+    match = re.search(rf"(?mi)^\s*{re.escape(key)}\s*:\s*[\"']?([^\s\"']+)", str(body or ""))
+    return str(match.group(1)).strip() if match else ""
+
+
+def _recovery_upsert_scalar(body: str, key: str, value: str) -> str:
+    body = str(body or "")
+    pattern = re.compile(rf"(?mi)^(?P<prefix>[ \t]*{re.escape(key)}\s*:\s*)(?P<value>[^\r\n]*)$")
+    if pattern.search(body):
+        return pattern.sub(lambda m: f"{m.group('prefix')}{value}", body, count=1)
+    suffix = "" if not body or body.endswith("\n") else "\n"
+    return f"{body}{suffix}{key}: {value}\n"
+
+
+def _recovery_case_path(case_id: str) -> Path:
+    safe = str(case_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", safe):
+        raise ValueError("invalid case_id")
+    return _governance_dir() / "cases" / f"{safe}.json"
+
+
+def _read_exhausted_recovery_case(case_id: str, target_id: str) -> dict[str, Any]:
+    path = _recovery_case_path(case_id)
+    try:
+        case = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"recovery case unavailable: {type(exc).__name__}: {exc}") from exc
+    if not isinstance(case, dict):
+        raise ValueError("recovery case root is not an object")
+    if str(case.get("case_type") or "").upper() != "DIRTY_CHECKPOINT_RECOVERY":
+        raise ValueError("case is not DIRTY_CHECKPOINT_RECOVERY")
+    if str(case.get("task_id") or "") != target_id:
+        raise ValueError("case task_id does not match target")
+    total = int(case.get("total_attempts") or 0)
+    maximum = int(case.get("max_total_attempts") or 0)
+    if maximum <= 0 or total < maximum:
+        raise ValueError(f"attempt budget is not exhausted: {total}/{maximum}")
+    if str(case.get("status") or "") != "HUMAN_REQUIRED":
+        raise ValueError(f"case must be HUMAN_REQUIRED after exhaustion, got {case.get('status')}")
+    return case
+
+
+def _human_exhausted_recovery_authorized(kb: Any, conn: Any, target_id: str, case_id: str) -> tuple[bool, int | None]:
+    try:
+        comments = kb.list_comments(conn, target_id)
+    except Exception:
+        comments = []
+    for comment in reversed(list(comments or [])):
+        author = str(getattr(comment, "author", "") or "").strip().lower()
+        body = str(getattr(comment, "body", "") or "")
+        if author != "dashboard":
+            continue
+        if _EXHAUSTED_AUTH_MARKER not in body:
+            continue
+        if not re.search(rf"(?mi)^\s*case_id\s*:\s*{re.escape(case_id)}\s*$", body):
+            continue
+        if not re.search(rf"(?mi)^\s*target_task_id\s*:\s*{re.escape(target_id)}\s*$", body):
+            continue
+        return True, int(getattr(comment, "id", 0) or 0) or None
+    return False, None
+
+
+def _run_recovery_git(workspace: Path, args: list[str], *, env: dict[str, str] | None = None, input_text: str | None = None, timeout: int = 60) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(workspace), *args],
+        input=input_text,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+        env=env,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or f"git rc={proc.returncode}").strip()[-1200:])
+    return (proc.stdout or "").strip()
+
+
+def _recovery_ref_name(target_id: str, status_sha256: str) -> str:
+    return f"refs/hermes/recovery/{target_id}/{status_sha256[:16]}"
+
+
+def _create_persistent_recovery_checkpoint(
+    workspace: str,
+    target_id: str,
+    case_id: str,
+    expected_checkpoint: dict[str, Any],
+    created_at: str,
+) -> dict[str, Any]:
+    path = Path(str(workspace or "")).resolve(strict=False)
+    live = _git_snapshot(str(path))
+    if not live.get("available"):
+        raise RuntimeError("live recovery checkpoint snapshot unavailable")
+    if int(live.get("changed_entries") or 0) <= 0:
+        raise RuntimeError("recovery worktree is no longer dirty")
+    for key in ("head", "status_sha256"):
+        if str(live.get(key) or "") != str(expected_checkpoint.get(key) or ""):
+            raise RuntimeError(f"recovery checkpoint fingerprint changed: {key}")
+
+    repo_top = Path(_run_recovery_git(path, ["rev-parse", "--show-toplevel"]))
+    if repo_top.resolve(strict=False) != path.resolve(strict=False):
+        raise RuntimeError("recovery workspace is not a Git worktree root")
+
+    head = str(live["head"])
+    fingerprint = str(live["status_sha256"])
+    ref_name = _recovery_ref_name(target_id, fingerprint)
+
+    with tempfile.TemporaryDirectory(prefix="hermes-recovery-index-") as td:
+        index_path = Path(td) / "index"
+        env = dict(os.environ)
+        env["GIT_INDEX_FILE"] = str(index_path)
+        _run_recovery_git(path, ["read-tree", head], env=env)
+        _run_recovery_git(path, ["add", "-A", "--", "."], env=env, timeout=120)
+        tree = _run_recovery_git(path, ["write-tree"], env=env)
+
+        existing = ""
+        probe = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--verify", "--quiet", f"{ref_name}^{{commit}}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
+        )
+        if probe.returncode == 0:
+            existing = probe.stdout.strip()
+
+        if existing:
+            existing_tree = _run_recovery_git(path, ["rev-parse", f"{existing}^{{tree}}"])
+            existing_parent = _run_recovery_git(path, ["rev-parse", f"{existing}^"])
+            if existing_tree != tree or existing_parent != head:
+                raise RuntimeError("existing recovery ref conflicts with current checkpoint")
+            commit = existing
+            reused = True
+        else:
+            date_value = str(created_at or "").strip() or _utc_now()
+            commit_env = dict(os.environ)
+            commit_env.update({
+                "GIT_AUTHOR_NAME": "Hermes Recovery",
+                "GIT_AUTHOR_EMAIL": "hermes-recovery@local",
+                "GIT_COMMITTER_NAME": "Hermes Recovery",
+                "GIT_COMMITTER_EMAIL": "hermes-recovery@local",
+                "GIT_AUTHOR_DATE": date_value,
+                "GIT_COMMITTER_DATE": date_value,
+            })
+            message = (
+                "Hermes governed recovery checkpoint\n\n"
+                f"case_id: {case_id}\n"
+                f"task_id: {target_id}\n"
+                f"status_sha256: {fingerprint}\n"
+            )
+            commit = _run_recovery_git(
+                path, ["commit-tree", tree, "-p", head], env=commit_env, input_text=message
+            )
+            zero = "0" * 40
+            update = subprocess.run(
+                ["git", "-C", str(path), "update-ref", ref_name, commit, zero],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
+            )
+            if update.returncode != 0:
+                raced = _run_recovery_git(path, ["rev-parse", "--verify", f"{ref_name}^{{commit}}"])
+                if raced != commit:
+                    raise RuntimeError((update.stderr or update.stdout or "git update-ref failed")[-1000:])
+            reused = False
+
+    after = _git_snapshot(str(path))
+    if (
+        not after.get("available")
+        or str(after.get("head") or "") != head
+        or str(after.get("status_sha256") or "") != fingerprint
+    ):
+        raise RuntimeError("recovery checkpoint creation mutated live worktree/index state")
+
+    return {
+        "checkpoint_commit": commit,
+        "checkpoint_ref": ref_name,
+        "checkpoint_tree": tree,
+        "parent_head": head,
+        "status_sha256": fingerprint,
+        "workspace": str(path),
+        "reused": reused,
+    }
+
+
+def _recovery_transaction_journal_path(case_id: str) -> Path:
+    root = _governance_dir() / "recovery-transactions"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"{case_id}.json"
+
+
+def _write_recovery_transaction_journal(case_id: str, payload: dict[str, Any]) -> None:
+    path = _recovery_transaction_journal_path(case_id)
+    with _file_lock(path):
+        data = {"case_id": case_id, **payload, "updated_at": _utc_now()}
+        _atomic_json_write(path, data)
+
+
+def _parse_task_skills(raw: Any) -> list[str] | None:
+    if not raw:
+        return None
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw]
+    try:
+        value = json.loads(str(raw))
+        if isinstance(value, list):
+            return [str(x) for x in value]
+    except Exception:
+        pass
+    return None
+
+
+def _event_once(conn: Any, task_id: str, kind: str, payload: dict[str, Any], case_id: str, now: int) -> None:
+    row = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id=? AND kind=? AND payload LIKE ? LIMIT 1",
+        (task_id, kind, f"%{case_id}%"),
+    ).fetchone()
+    if row:
+        return
+    conn.execute(
+        "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, NULL, ?, ?, ?)",
+        (task_id, kind, json.dumps(payload, ensure_ascii=False, sort_keys=True), now),
+    )
+
+
+def _comment_once(kb: Any, conn: Any, task_id: str, author: str, marker: str, case_id: str, body: str) -> None:
+    row = conn.execute(
+        "SELECT 1 FROM task_comments WHERE task_id=? AND author=? AND body LIKE ? AND body LIKE ? LIMIT 1",
+        (task_id, author, f"%{marker}%", f"%{case_id}%"),
+    ).fetchone()
+    if row:
+        return
+    kb.add_comment(conn, task_id, author=author, body=body)
+
+
+def _materialize_recovery_replacement(
+    kb: Any,
+    conn: Any,
+    *,
+    board: str,
+    root_id: str,
+    target_id: str,
+    case_id: str,
+    checkpoint: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    old = conn.execute("SELECT * FROM tasks WHERE id=?", (target_id,)).fetchone()
+    if old is None:
+        raise RuntimeError("target task disappeared")
+    old_status = str(old["status"] or "")
+    if old_status not in {"blocked", "triage", "archived"}:
+        raise RuntimeError(f"target status is not safely supersedable: {old_status}")
+    if old["current_run_id"] is not None or old["worker_pid"] is not None:
+        raise RuntimeError("target still has run ownership")
+    old_profile = str(old["assignee"] or "")
+    if old_profile not in DIRTY_RECOVERY_ALLOWED_TARGET_PROFILES:
+        raise RuntimeError("target profile is outside dirty recovery allowlist")
+
+    recovery_commit = str(checkpoint["checkpoint_commit"])
+    fingerprint = str(checkpoint["status_sha256"])
+    idem = f"exhausted-recovery:{case_id}"
+    existing = conn.execute(
+        "SELECT id FROM tasks WHERE idempotency_key=? ORDER BY created_at DESC LIMIT 1", (idem,)
+    ).fetchone()
+    if existing:
+        replacement_id = str(existing["id"])
+        return {
+            "replacement_task_id": replacement_id,
+            "target_profile": old_profile,
+            "idempotent_existing": True,
+        }
+
+    incoming = [str(r[0]) for r in conn.execute(
+        "SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id", (target_id,)
+    ).fetchall()]
+    outgoing = [str(r[0]) for r in conn.execute(
+        "SELECT child_id FROM task_links WHERE parent_id=? ORDER BY child_id", (target_id,)
+    ).fetchall()]
+
+    base_body = str(old["body"] or "")
+    base_body = _recovery_upsert_scalar(base_body, "base_ref", recovery_commit)
+    base_body = _recovery_upsert_scalar(base_body, "created_from_commit", recovery_commit)
+    base_body = _recovery_upsert_scalar(base_body, "recovery_replacement", "true")
+    base_body = _recovery_upsert_scalar(base_body, "supersedes_card_id", target_id)
+    base_body = _recovery_upsert_scalar(base_body, "recovery_case_id", case_id)
+    base_body = _recovery_upsert_scalar(base_body, "recovery_checkpoint", recovery_commit)
+    base_body = _recovery_upsert_scalar(base_body, "recovery_status_sha256", fingerprint)
+    base_body = _recovery_upsert_scalar(base_body, "recovery_target_profile", old_profile)
+
+    with kb.write_txn(conn):
+        replacement_id = kb.create_task(
+            conn,
+            title=f"{str(old['title'] or '').strip()} [recovery replacement]",
+            body=base_body,
+            assignee=_EXHAUSTED_HOLD_ASSIGNEE,
+            created_by="governance-guard",
+            workspace_kind="worktree",
+            workspace_path=None,
+            branch_name=None,
+            tenant=old["tenant"],
+            priority=int(old["priority"] or 0),
+            parents=tuple(incoming),
+            triage=False,
+            idempotency_key=idem,
+            max_runtime_seconds=old["max_runtime_seconds"],
+            skills=_parse_task_skills(old["skills"]),
+            max_retries=old["max_retries"],
+            model_override=old["model_override"],
+            provider_override=old["provider_override"],
+            reasoning_effort=old["reasoning_effort"],
+            goal_mode=False,
+            goal_max_turns=None,
+            initial_status="running",
+            session_id=None,
+            board=board,
+            project_id=old["project_id"],
+            project_source_task_id=target_id,
+            completion_contract=old["completion_contract"],
+        )
+        final_body = _recovery_upsert_scalar(base_body, "card_id", replacement_id)
+        conn.execute("UPDATE tasks SET body=? WHERE id=?", (final_body, replacement_id))
+
+        # Replace old -> downstream edges with replacement -> downstream edges.
+        for child_id in outgoing:
+            if child_id == replacement_id:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links(parent_id, child_id) VALUES (?, ?)",
+                (replacement_id, child_id),
+            )
+        # Old inbound edges were copied by create_task(parents=...). Remove every old edge atomically.
+        conn.execute("DELETE FROM task_links WHERE parent_id=? OR child_id=?", (target_id, target_id))
+
+        now = int(time.time())
+        if old_status != "archived":
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status='archived', completed_at=COALESCE(completed_at, ?),
+                       claim_lock=NULL, claim_expires=NULL, worker_pid=NULL,
+                       current_run_id=NULL, block_kind=NULL
+                 WHERE id=? AND status IN ('blocked','triage')
+                   AND current_run_id IS NULL AND worker_pid IS NULL
+                """,
+                (now, target_id),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("supersede CAS lost")
+
+        signed = (
+            f"{_EXHAUSTED_SIGNED_MARKER}\n"
+            f"root_task_id: {root_id}\n"
+            f"supersedes_task_id: {target_id}\n"
+            f"replacement_task_id: {replacement_id}\n"
+            f"case_id: {case_id}\n"
+            f"recovery_checkpoint: {recovery_commit}\n"
+            f"status_sha256: {fingerprint}\n"
+            f"target_profile: {old_profile}\n"
+        )
+        old_comment = (
+            "SUPERSEDED_RECOVERY\n"
+            f"case_id: {case_id}\n"
+            f"recovery_checkpoint: {recovery_commit}\n"
+            f"replacement_task_id: {replacement_id}\n"
+            f"reason: {reason[:500]}\n"
+        )
+        root_comment = (
+            "RECOVERY_REPLACEMENT_LINEAGE\n"
+            f"old_card: {target_id}\n"
+            f"recovery_checkpoint: {recovery_commit}\n"
+            f"replacement_card: {replacement_id}\n"
+            f"case_id: {case_id}\n"
+        )
+        _comment_once(kb, conn, target_id, "governance-guard", "SUPERSEDED_RECOVERY", case_id, old_comment)
+        _comment_once(kb, conn, replacement_id, "governance-guard", _EXHAUSTED_SIGNED_MARKER, case_id, signed)
+        _comment_once(kb, conn, root_id, "governance-guard", "RECOVERY_REPLACEMENT_LINEAGE", case_id, root_comment)
+
+        payload = {
+            "case_id": case_id,
+            "old_task_id": target_id,
+            "replacement_task_id": replacement_id,
+            "recovery_checkpoint": recovery_commit,
+        }
+        _event_once(conn, target_id, "superseded_recovery", payload, case_id, now)
+        _event_once(conn, replacement_id, "recovery_replacement_created", payload, case_id, now)
+        _event_once(conn, root_id, "dependency_relinked_recovery", payload, case_id, now)
+
+    # Post-commit effects only. The old dirty worktree is deliberately preserved as evidence.
+    try:
+        kb.recompute_ready(conn)
+    except Exception:
+        pass
+    for task_id, fields in (
+        (target_id, ["status", "completed_at", "claim_lock", "claim_expires", "worker_pid", "current_run_id", "block_kind"]),
+        (replacement_id, ["body", "status", "assignee"]),
+        (root_id, ["status"]),
+    ):
+        try:
+            kb.notify_task_updated(conn, task_id, fields, board=board)
+        except Exception:
+            pass
+
+    return {
+        "replacement_task_id": replacement_id,
+        "target_profile": old_profile,
+        "idempotent_existing": False,
+        "incoming_relinked": incoming,
+        "outgoing_relinked": outgoing,
+    }
+
+
+def _sync_recovery_lineage_state(case_id: str, target_id: str, replacement_id: str, checkpoint: dict[str, Any]) -> None:
+    case_path = _recovery_case_path(case_id)
+    try:
+        case = json.loads(case_path.read_text(encoding="utf-8"))
+    except Exception:
+        case = {}
+    if isinstance(case, dict):
+        case["status"] = "RECOVERY_REPLACEMENT_MATERIALIZED"
+        case["recovery_transaction"] = {
+            "old_task_id": target_id,
+            "recovery_checkpoint": checkpoint.get("checkpoint_commit"),
+            "recovery_ref": checkpoint.get("checkpoint_ref"),
+            "replacement_task_id": replacement_id,
+            "materialized_at": _utc_now(),
+        }
+        _atomic_json_write(case_path, case)
+
+    def mutate(state):
+        cases = state.setdefault("cases", {})
+        if isinstance(cases.get(case_id), dict):
+            cases[case_id]["status"] = "RECOVERY_REPLACEMENT_MATERIALIZED"
+        old = state.setdefault("tasks", {}).setdefault(target_id, {"total_attempts": 0, "runs": {}})
+        old["superseded_recovery"] = {
+            "case_id": case_id,
+            "recovery_checkpoint": checkpoint.get("checkpoint_commit"),
+            "replacement_task_id": replacement_id,
+        }
+        replacement = state.setdefault("tasks", {}).setdefault(replacement_id, {"total_attempts": 0, "runs": {}})
+        replacement["recovery_lineage"] = {
+            "case_id": case_id,
+            "supersedes_task_id": target_id,
+            "recovery_checkpoint": checkpoint.get("checkpoint_commit"),
+            "inherited_attempts": int(old.get("total_attempts") or 0),
+        }
+    _update_state(mutate)
+
+
+def _execute_exhausted_recovery_transaction(args: dict, **kwargs) -> str:
+    del kwargs
+    if not _dirty_recovery_tool_available():
+        return json.dumps({"ok": False, "error": "exhausted recovery unavailable outside implementation-orchestrator"}, ensure_ascii=False)
+    root_id = str(os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    target_id = str(args.get("target_task_id") or "").strip()
+    case_id = str(args.get("case_id") or "").strip()
+    reason = str(args.get("reason") or "").strip()[:500]
+    if not re.fullmatch(r"t_[0-9a-fA-F]+", target_id):
+        return json.dumps({"ok": False, "error": "invalid target_task_id"}, ensure_ascii=False)
+    if not case_id or not reason:
+        return json.dumps({"ok": False, "error": "case_id and reason are required"}, ensure_ascii=False)
+    if target_id == root_id:
+        return json.dumps({"ok": False, "error": "target must be a child card"}, ensure_ascii=False)
+
+    board = _normalized_board(os.environ.get("HERMES_KANBAN_BOARD") or None)
+    try:
+        from hermes_cli import kanban_db as kb
+        case = _read_exhausted_recovery_case(case_id, target_id)
+        conn = _kanban_connect(board=board)
+        try:
+            root = kb.get_task(conn, root_id)
+            target = kb.get_task(conn, target_id)
+            if root is None or target is None:
+                raise RuntimeError("root or target task not found")
+            if str(getattr(root, "assignee", "") or "") != "implementation-orchestrator":
+                raise RuntimeError("active root is not implementation-orchestrator")
+            if not _dirty_recovery_related(conn, root_id, target_id, str(getattr(target, "body", "") or "")):
+                raise RuntimeError("target is not related to active root")
+            if str(getattr(target, "status", "") or "") not in {"blocked", "triage", "archived"}:
+                raise RuntimeError("target is not blocked/triage/archived")
+            if getattr(target, "current_run_id", None) is not None:
+                raise RuntimeError("target still has a current run")
+
+            authorized, authorization_comment_id = _human_exhausted_recovery_authorized(kb, conn, target_id, case_id)
+            if not authorized:
+                required_comment = (
+                    f"{_EXHAUSTED_AUTH_MARKER}\n"
+                    f"case_id: {case_id}\n"
+                    f"target_task_id: {target_id}\n"
+                )
+                return json.dumps({
+                    "ok": False,
+                    "authorization_required": True,
+                    "error": "dashboard human authorization comment is required",
+                    "required_comment": required_comment,
+                }, ensure_ascii=False)
+
+            expected = dict((((case.get("attempt") or {}).get("after")) or {}))
+            if not expected.get("path") or not expected.get("head") or not expected.get("status_sha256"):
+                raise RuntimeError("case recovery checkpoint fingerprint is incomplete")
+
+            journal = {
+                "phase": "AUTHORIZED",
+                "root_task_id": root_id,
+                "target_task_id": target_id,
+                "authorization_comment_id": authorization_comment_id,
+                "status_sha256": expected.get("status_sha256"),
+            }
+            _write_recovery_transaction_journal(case_id, journal)
+
+            checkpoint = _create_persistent_recovery_checkpoint(
+                str(expected.get("path")), target_id, case_id, expected, str(case.get("created_at") or "")
+            )
+            journal.update({"phase": "CHECKPOINTED", **checkpoint})
+            _write_recovery_transaction_journal(case_id, journal)
+
+            materialized = _materialize_recovery_replacement(
+                kb, conn,
+                board=board,
+                root_id=root_id,
+                target_id=target_id,
+                case_id=case_id,
+                checkpoint=checkpoint,
+                reason=reason,
+            )
+            replacement_id = str(materialized["replacement_task_id"])
+            journal.update({"phase": "KANBAN_COMMITTED", **materialized})
+            _write_recovery_transaction_journal(case_id, journal)
+        finally:
+            conn.close()
+
+        state_sync_error = None
+        try:
+            _sync_recovery_lineage_state(case_id, target_id, replacement_id, checkpoint)
+        except Exception as exc:
+            state_sync_error = f"{type(exc).__name__}: {exc}"[:1000]
+
+        journal.update({"phase": "COMMITTED" if state_sync_error is None else "KANBAN_COMMITTED_STATE_SYNC_PENDING"})
+        if state_sync_error:
+            journal["state_sync_error"] = state_sync_error
+        _write_recovery_transaction_journal(case_id, journal)
+        _append_event(
+            "exhausted_recovery_transaction_materialized",
+            root_task_id=root_id,
+            task_id=target_id,
+            case_id=case_id,
+            replacement_task_id=replacement_id,
+            recovery_checkpoint=checkpoint.get("checkpoint_commit"),
+            authorization_comment_id=authorization_comment_id,
+            state_sync_error=state_sync_error,
+        )
+        return json.dumps({
+            "ok": True,
+            "transaction": "EXHAUSTED_RECOVERY_REPLACEMENT",
+            "old_task_id": target_id,
+            "replacement_task_id": replacement_id,
+            "target_profile": materialized.get("target_profile"),
+            "recovery_checkpoint": checkpoint.get("checkpoint_commit"),
+            "recovery_ref": checkpoint.get("checkpoint_ref"),
+            "status_sha256": checkpoint.get("status_sha256"),
+            "old_task_state": "SUPERSEDED_RECOVERY",
+            "replacement_assignee": _EXHAUSTED_HOLD_ASSIGNEE,
+            "worktree_prepared": False,
+            "next_action": "worktree_guardian_prepare replacement using returned target_profile/base_ref",
+            "state_sync_pending": state_sync_error is not None,
+            "state_sync_error": state_sync_error,
+        }, ensure_ascii=False)
+    except GovernanceStateError as exc:
+        _append_event("exhausted_recovery_transaction_failed", root_task_id=root_id, task_id=target_id, case_id=case_id, fail_closed=True, error=str(exc)[:1000])
+        return json.dumps({"ok": False, "error": "STATE_UNAVAILABLE", "detail": str(exc)[:1000]}, ensure_ascii=False)
+    except Exception as exc:
+        _append_event("exhausted_recovery_transaction_failed", root_task_id=root_id, task_id=target_id, case_id=case_id, fail_closed=True, error=f"{type(exc).__name__}: {exc}"[:1000])
+        return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"[:1000]}, ensure_ascii=False)
+
 def _governor_tool_policy(tool_name=None, **kwargs):
     del kwargs
     profile = os.environ.get("HERMES_PROFILE")
@@ -2659,8 +3990,10 @@ def _governor_tool_policy(tool_name=None, **kwargs):
 
 
 def register(ctx):
+    _install_provider_exit_reclassification()
     ctx.register_hook("transform_api_error_classification", _classify_api_error)
     ctx.register_hook("api_request_error", _api_request_error)
+    ctx.register_hook("post_api_request", _post_api_request_success)
     ctx.register_hook("post_tool_call", _post_tool_call)
     ctx.register_hook("kanban_task_completed", _kanban_task_completed)
     ctx.register_hook("kanban_task_blocked", _kanban_task_blocked)
@@ -2676,6 +4009,14 @@ def register(ctx):
         toolset=DIRTY_RECOVERY_TOOLSET,
         schema=DIRTY_RECOVERY_SCHEMA,
         handler=_request_dirty_checkpoint_recovery,
+        check_fn=_dirty_recovery_tool_available,
+        emoji="🛡️",
+    )
+    ctx.register_tool(
+        name="execute_exhausted_recovery_transaction",
+        toolset=DIRTY_RECOVERY_TOOLSET,
+        schema=EXHAUSTED_RECOVERY_SCHEMA,
+        handler=_execute_exhausted_recovery_transaction,
         check_fn=_dirty_recovery_tool_available,
         emoji="🛡️",
     )

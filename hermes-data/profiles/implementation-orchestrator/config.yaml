@@ -1,5 +1,7 @@
 model:
-  default: gpt-6-astra
+  #default: gpt-5.6-terra
+  default: gpt-5.6-sol
+  #default: gpt-6-astra
   provider: openai-codex
   base_url: https://chatgpt.com/backend-api/codex
 agent:
@@ -9,9 +11,9 @@ agent:
   verbose: false
   reasoning_effort: high
   command_denylist:
-    - git push
-    - git push *
-    - '*git*push*'
+  - git push
+  - git push *
+  - '*git*push*'
   personalities:
     helpful: You are a helpful, friendly AI assistant.
     concise: You are a concise assistant. Keep responses brief and to the point.
@@ -148,8 +150,8 @@ worktree_guardian:
   holding_assignee: __worktree_guardian_hold__
   workspace_root: /workspace
   required_files:
-    - project.godot
-    - AGENTS.md
+  - project.godot
+  - AGENTS.md
   validation_timeout_seconds: 60
   provisioning:
     max_attempts: 3
@@ -167,55 +169,60 @@ session_reset:
 group_sessions_per_user: true
 platform_toolsets:
   cli:
-    - browser
-    - clarify
-    - code_execution
-    - cronjob
-    - delegation
-    - file
-    - godot_lsp
-    - image_gen
-    - memory
-    - session_search
-    - skills
-    - terminal
-    - todo
-    - tts
-    - vision
-    - web
-    - orchestration_control
-    - worktree_guardian
-    - gwrm_gut_runner
+  - browser
+  - clarify
+  - code_execution
+  - cronjob
+  - delegation
+  - file
+  - godot_lsp
+  - image_gen
+  - memory
+  - session_search
+  - skills
+  - terminal
+  - todo
+  - tts
+  - vision
+  - web
+  - orchestration_control
+  - worktree_guardian
+  - gwrm_gut_runner
+  - operational_sync
+  - operational_cost_telemetry
   telegram:
-    - hermes-telegram
+  - hermes-telegram
   discord:
-    - hermes-discord
+  - hermes-discord
   whatsapp:
-    - hermes-whatsapp
+  - hermes-whatsapp
   slack:
-    - hermes-slack
+  - hermes-slack
   signal:
-    - hermes-signal
+  - hermes-signal
   homeassistant:
-    - hermes-homeassistant
+  - hermes-homeassistant
   qqbot:
-    - hermes-qqbot
+  - hermes-qqbot
   yuanbao:
-    - hermes-yuanbao
+  - hermes-yuanbao
   teams:
-    - hermes-teams
+  - hermes-teams
   google_chat:
-    - hermes-google_chat
+  - hermes-google_chat
 plugins:
   enabled:
-    - godot-lsp
-    - governance-guard
-    - gwrm-lifecycle-cleanup
-    - operational-block-completion-guard
-    - orchestration-control
-    - rtk-rewrite
-    - worktree-guardian
-    - gwrm-gut-runner
+  - godot-lsp
+  - governance-guard
+  - execution-governance
+  - gwrm-lifecycle-cleanup
+  - operational-block-completion-guard
+  - orchestration-control
+  - rtk-rewrite
+  - worktree-guardian
+  - gwrm-gut-runner
+  - operational-sync
+  - operational-cost-telemetry
   disabled: []
 image_gen:
   provider: openai-codex
@@ -223,11 +230,11 @@ image_gen:
   model: gpt-image-2-high
 known_plugin_toolsets:
   cli:
-    - spotify
-    - godot_lsp
-    - orchestration_control
-    - worktree_guardian
-    - gwrm_gut_runner
+  - spotify
+  - godot_lsp
+  - orchestration_control
+  - worktree_guardian
+  - gwrm_gut_runner
 gwrm_gut_runner:
   poll_interval_seconds: 5
   max_wait_seconds: 720
@@ -244,7 +251,22 @@ mcp_servers:
     timeout: 900
     tools:
       include:
-        - gwrm_status
-        - get_worktree_status
+      - gwrm_status
+      - get_worktree_status
       resources: false
       prompts: false
+operational_sync:
+  workspace_root: /workspace
+  repo_root: /workspace/skill_system_framework
+  git_timeout_seconds: 60
+  graphify_timeout_seconds: 300
+  graphify_enabled: true
+operational_cost_telemetry:
+  profiles_root: /opt/data/profiles
+  report_dir: /opt/data/logs/operational-cost-telemetry/reports
+  max_cards: 1000
+  max_sessions: 5000
+  top_n: 10
+  gwrm_events_path: /opt/data/logs/gwrm-gut-runner/events.jsonl
+  gwrm_cache_path: /opt/data/logs/gwrm-gut-runner/terminal-cache-v2.json
+  auto_report_on_session_end: true

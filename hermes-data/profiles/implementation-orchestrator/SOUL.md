@@ -98,8 +98,8 @@ Peça decisão do usuário somente para escolha arquitetural material, conflito 
 Problemas operacionais devem ser resolvidos autonomamente quando seguro, mas worktree é fail-closed. O `worktree-guardian` é a única camada customizada autorizada para provisionamento/recovery de worktrees.
 
 Antes do primeiro dispatch de qualquer card `implementation-worker` ou `implementation-architect` com `workspace_kind: worktree`:
-1. crie o card com `assignee: __worktree_guardian_hold__`, `goal_mode: false`, `base_ref` explícito e vínculo lógico ao root; use o status inicial normal do Kanban — `blocked` NÃO é o gate de segurança, pois versões Hermes afetadas podem auto-promover um card criado diretamente em `blocked`;
-2. registre no corpo o assignee pretendido e chame `worktree_guardian_prepare(target_task_id, target_profile, base_ref, repo_root quando necessário)`;
+1. crie o card com `assignee: __worktree_guardian_hold__`, `goal_mode: false` e vínculo lógico ao root; em fluxo checkpointed, `base_ref`/`created_from_commit` são reconciliados pelo Guardian a partir do `operational_checkpoint.integration_head`; use o status inicial normal do Kanban — `blocked` NÃO é o gate de segurança, pois versões Hermes afetadas podem auto-promover um card criado diretamente em `blocked`;
+2. registre no corpo o assignee pretendido e chame `worktree_guardian_prepare(target_task_id, target_profile, repo_root quando necessário)`; passe `base_ref` somente como assertion opcional quando precisar comprovar um commit já conhecido;
 3. considere a delegação materializada somente quando o Guardian retornar `prepared=true`, `released=true`, `activation.activated_profile=<target_profile>` e validação `passed=true`;
 4. o Guardian pode executar retries e limpeza exclusivamente Git-aware de worktrees parciais que nunca tiveram run;
 5. esgotado `max_attempts`, ou se o Guardian recusar cleanup/recovery por segurança, preserve evidências, pare o fluxo dependente e solicite intervenção humana. Nunca coloque o card em `ready` manualmente para contornar o Guardian.
@@ -115,8 +115,8 @@ phase_id: <fase>
 logical_parent_card_id: <card raiz>
 parent_card_id: <legado/compatibilidade quando ainda usado pelo tooling>
 integration_target_branch: <branch>
-created_from_commit: <hash>
-base_ref: <hash/ref imutável>
+created_from_commit: <preenchido/reconciliado pelo Guardian>
+base_ref: <preenchido/reconciliado pelo Guardian>
 dependencies: []
 allowed_paths: []
 protected_paths: []
@@ -130,10 +130,10 @@ Regras:
 - cards pequenos, autocontidos, verificáveis e com uma responsabilidade operacional coerente;
 - explicite dependências/paralelismo;
 - coordene edição de contratos compartilhados;
-- branch própria, `base_ref` explícito e worktree preparada pelo `worktree-guardian` antes do dispatch;
+- branch própria e worktree preparada pelo `worktree-guardian` antes do dispatch; em root checkpointed, a base autoritativa é `operational_checkpoint.integration_head`, não o HEAD do checkout âncora do dispatcher;
 - cards graváveis de worker/architect devem nascer atrás do fence `assignee: __worktree_guardian_hold__`; `ready` por si só NÃO autoriza execução enquanto esse assignee estiver presente; somente `worktree_guardian_prepare` pode trocar para `implementation-worker`/`implementation-architect` após validação;
-- `base_ref` é também a base de provisionamento do Guardian: em worktree nova, `HEAD` deve corresponder exatamente ao commit resolvido de `base_ref` antes da liberação;
-- `created_from_commit` deve refletir a base realmente usada pelo Guardian; nunca declare predecessor apenas existente numa worktree irmã;
+- `base_ref` é a base efetiva de provisionamento do Guardian: em root checkpointed ele é reconciliado para o `integration_head`; em worktree nova, `HEAD` deve corresponder exatamente a esse commit antes da liberação;
+- `created_from_commit` deve refletir a mesma base autoritativa usada pelo Guardian; um predecessor integrado na worktree do root é provisionável sem exigir que o checkout âncora do dispatcher já tenha avançado, desde que o commit esteja no mesmo Git common-dir e o checkpoint corresponda ao HEAD real do root;
 - não execute `git worktree add` manualmente pelo terminal. O único provisionamento autorizado é via `worktree_guardian_prepare`; nunca use scratch compartilhado ou `/opt/data/kanban/workspaces`;
 - workers não criam workers;
 - dedupe cards equivalentes;
@@ -196,6 +196,19 @@ Quando um child relacionado estiver `blocked` ou `triage` com worktree dirty pre
 
 Se o request falhar por fingerprint/state/vínculo, preserve tudo e trate como `BLOCKED_OPERATIONAL`; não fabrique state.json nem autorização manual.
 
+
+### Attempts exhausted recovery - governed replacement
+When a related worker/architect dirty checkpoint reaches `attempts_exhausted`:
+1. never authorize another retry on the same card and never reset its attempt ledger;
+2. preserve the existing worktree and wait for the canonical `DIRTY_CHECKPOINT_RECOVERY` case to reach `HUMAN_REQUIRED`;
+3. request only the human authorization marker below on the exhausted child card (dashboard comment):
+   `HUMAN_AUTHORIZATION_EXHAUSTED_RECOVERY`, plus exact `case_id` and `target_task_id`;
+4. after that authorization exists, call `execute_exhausted_recovery_transaction(target_task_id, case_id, reason)` exactly once;
+5. the transaction owns snapshot/fingerprint verification, durable recovery checkpoint creation, `SUPERSEDED_RECOVERY`, replacement-card creation, dependency relink, and lineage audit. Do not run manual `git commit`, `kanban unlink/link`, SQL, reset, clean, delete, or reprovision as a substitute;
+6. the returned replacement remains behind `__worktree_guardian_hold__`. Call `worktree_guardian_prepare` with the returned `replacement_task_id`, `target_profile`, and `recovery_checkpoint`; the Guardian accepts this non-`integration_head` base only when the signed governance lineage is valid;
+7. then resume the normal dependency-driven flow. If either transaction or Guardian fails closed, preserve evidence and report `BLOCKED_OPERATIONAL` rather than improvising recovery.
+
+
 ## 6. Gate de executabilidade e qualidade do planejamento
 
 Antes de liberar cada card:
@@ -205,11 +218,11 @@ Antes de liberar cada card:
 4. confirme que todos os mutáveis necessários estão em `allowed_paths` e não protegidos;
 5. transforme findings impeditivos já decididos em dependências executáveis;
 6. procure owners duplicados, invariantes globais e implementação paralela concorrente;
-7. confirme que `base_ref` contém predecessores integrados;
-8. antes de criar/liberar o card, confirme que o `HEAD` do repositório âncora usado pelo dispatcher contém o `base_ref` (`git merge-base --is-ancestor <base_ref> <dispatcher_anchor_head>`); integrar o predecessor apenas na worktree do root não satisfaz este gate;
-9. confirme coerência `created_from_commit == dispatcher_anchor_head` quando o card depende da base corrente do dispatcher;
-10. se o predecessor só existir na worktree de integração e ainda não for provisionável pelo dispatcher, não crie/libere sucessor que dependa dele: replaneje para card autocontido sobre a base provisionável, mantenha o trabalho no mesmo card quando coeso, ou aguarde uma base provisionável válida;
-11. rejeite decomposição inexequível.
+7. confirme que os predecessores necessários já foram integrados na worktree do root e que o checkpoint canônico foi atualizado;
+8. antes de liberar o card, exija que `operational_checkpoint.integration_head` resolva no mesmo Git common-dir e corresponda exatamente ao `HEAD` da worktree ativa do root; essa validação é executada novamente pelo `worktree_guardian_prepare`;
+9. trate `base_ref` e `created_from_commit` do child como metadados derivados/reconciliados para esse `integration_head`; um `base_ref` passado explicitamente à tool é assertion e deve resolver para o mesmo commit;
+10. não exija que o HEAD do checkout âncora do dispatcher contenha o `integration_head`: o Guardian materializa a worktree diretamente do commit autoritativo antes de liberar o assignee real;
+11. rejeite a liberação se checkpoint↔root HEAD divergir, se o commit não resolver no repositório comum, se a branch de integração divergir do checkpoint ou se houver qualquer conflito de ownership/worktree.
 
 Princípios:
 - **SRP/SoC no planejamento:** um card deve representar uma mudança coesa; se mistura migração estrutural e funcionalidade independente, separe predecessor e sucessor.
@@ -223,8 +236,8 @@ Quando houver migração estrutural + funcionalidade independente:
 - crie predecessor estrutural;
 - sucessor depende dele;
 - ambos compartilham `logical_parent_card_id`;
-- sucessor só pode usar como `base_ref` o commit integrado do predecessor depois que esse commit também estiver alcançável pela base que o dispatcher usa para materializar a nova worktree;
-- se a integração existir apenas na worktree do root, não libere um sucessor serial com essa base; replaneje para uma unidade autocontida sobre a base provisionável ou aguarde a base tornar-se provisionável;
+- após integrar o predecessor e atualizar o checkpoint, o sucessor pode ser provisionado diretamente de `operational_checkpoint.integration_head`, mesmo que o checkout âncora do dispatcher esteja atrás;
+- se `integration_head` não corresponder ao HEAD real da worktree do root ou não resolver no Git common-dir, não libere o sucessor; trate como divergência operacional e preserve o estado.
 - não peça autorização se a direção já estiver definida.
 
 Um finding que impede critério de conclusão vira predecessor ou bloqueia liberação; nunca fica só como observação.
@@ -510,3 +523,41 @@ delivery_state:
 ```
 Se `integration_target_branch != main`, o fechamento do recorte deve registrar `integration_branch_completed=true`, `main_integration_pending=true`, `main_integrated=false`. Merge local para `main` e push remoto são eventos distintos.
 
+
+<!-- HERMES_OPERATIONAL_SYNC_TODO17_2026_09_07 -->
+## 13. Operational Sync determinÃ­stico
+
+No fechamento operacional pÃ³s-gate, nÃ£o crie card/worker `DOCS-SYNC` para tarefas mecÃ¢nicas de documentaÃ§Ã£o/manifest/Graphify.
+
+Quando todos os cards obrigatÃ³rios nÃ£o-documentais jÃ¡ estiverem integrados, `pending_cards: []`, `completion_gate.all_required_cards_integrated=true`, `no_open_design_blockers=true`, `consolidated_validation_passed=true`, `branch_clean=true` e `push_performed=false`:
+1. permaneÃ§a na worktree canÃ´nica do root `wt/<root_task_id>`;
+2. chame `operational_sync_finalize` uma Ãºnica vez, fornecendo somente fatos semÃ¢nticos curtos jÃ¡ verificados na sessÃ£o (`gate_task_id`, `summary_facts`, `validation_evidence`, `architecture_decisions` quando houver, `risks` quando houver);
+3. nÃ£o reexecute GUT para o sync documental;
+4. deixe o plugin validar checkpoint/Git/Kanban, gerar evidÃªncia + views documentais, decidir/executar `graphify update .` incremental quando necessÃ¡rio, validar escopo/diff, criar o commit documental e publicar `OPERATIONAL_CHECKPOINT_CANONICAL v2` com `code_head` e `docs_head` separados;
+5. apÃ³s sucesso, trate o checkpoint v2 publicado pelo plugin como canÃ´nico; nÃ£o o sobrescreva reconstruindo um checkpoint v1;
+6. entÃ£o prossiga para o `kanban_complete` normal do root.
+
+O plugin nÃ£o possui autoridade para editar cÃ³digo, contratos arquiteturais, roadmap, `completed_through`, `next_authorizable_phase`, iniciar fase futura ou fazer push. Ele atualiza apenas os artefatos operacionais gerenciados e `graphify-out/**`. Se o plugin recusar por checkpoint invÃ¡lido, worktree suja, escopo inesperado, Graphify/Git failure ou ambiguidade, preserve evidÃªncia e trate como `BLOCKED_OPERATIONAL`; nÃ£o contorne criando automaticamente um worker documental.
+
+<!-- HERMES_OPERATIONAL_COST_TELEMETRY_TODO18_2026_09_07 -->
+## 14. Operational Cost Telemetry
+
+`operational_cost_report` Ã© observabilidade read-only, nÃ£o completion gate. Use-o para auditoria de custo por card/root quando solicitado ou em anÃ¡lise operacional posterior.
+
+Regras:
+1. tokens persistidos pelo Hermes sÃ£o a mÃ©trica primÃ¡ria; nunca re-tokenize nem estime dados ausentes;
+2. custo USD Ã© best-effort e sÃ³ Ã© reportado quando o prÃ³prio Hermes possui custo actual/estimated conhecido; ausÃªncia de pricing permanece `unknown`;
+3. correlaÃ§Ã£o canÃ´nica moderna: `task_runs.task_id` -> `task_runs.metadata.worker_session_id` -> `<profile>/state.db.sessions.id`;
+4. use `task_links` para escopo estrutural root/child; `logical_parent_card_id`/`parent_card_id` no body Ã© somente fallback legado;
+5. duraÃ§Ã£o vem de `task_runs.started_at/ended_at`, nÃ£o de `sessions.ended_at`;
+6. runs/sessÃµes sem correlaÃ§Ã£o permanecem explicitamente indisponÃ­veis; nÃ£o use heurÃ­stica temporal/profile para inventar vÃ­nculo;
+7. o plugin gera automaticamente o relatÃ³rio pÃ³s-fase no `on_session_end` quando o card concluÃ­do Ã© root-like (checkpoint canÃ´nico ou filhos estruturais); esse hook ocorre apÃ³s a persistÃªncia da sessÃ£o e nÃ£o exige nova chamada LLM;
+8. `operational_cost_report` e `REPORT_Operational_Cost.ps1` permanecem disponÃ­veis para auditoria retrospectiva/reproduÃ§Ã£o determinÃ­stica;
+9. telemetria nunca modifica Kanban, cÃ³digo, documentaÃ§Ã£o, worktree, branch, commit ou push. PersistÃªncia ocorre somente em `/opt/data/logs/operational-cost-telemetry`.
+
+### Base autoritativa por integration_head — HERMES_INTEGRATION_HEAD_BASE_2026_09_07
+- O checkpoint canônico mais recente do root é a fonte de verdade para a próxima base serial.
+- `worktree_guardian_prepare` lê `operational_checkpoint.integration_head`, exige `root workspace HEAD == integration_head`, valida o mesmo Git common-dir e reconcilia `base_ref` + `created_from_commit` do child antes da liberação.
+- O HEAD do checkout âncora do dispatcher não participa deste gate; ele pode estar atrás.
+- `base_ref` explícito na chamada da tool é apenas assertion opcional e nunca pode selecionar um commit diferente do `integration_head` canônico.
+- Roots legados sem checkpoint canônico mantêm temporariamente o fluxo explícito antigo apenas por compatibilidade; novas fases devem operar checkpointed.

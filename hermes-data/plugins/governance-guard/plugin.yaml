@@ -1,9 +1,11 @@
 name: governance-guard
-version: 0.3.2
+version: 0.5.3
 description: Deterministic budget, provider and execution-attempt guard for Hermes
   Kanban profiles.
 manifest_version: 2
 api_version: 1
+requires_plugins:
+- execution-governance
 tags:
 - governance
 - kanban

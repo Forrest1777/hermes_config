@@ -1,0 +1,5 @@
+name: operational-sync
+version: 1.0.0
+description: Deterministic orchestrator-only synchronization of operational evidence, docs, implementation manifest and incremental Graphify from the canonical checkpoint.
+provides_tools:
+  - operational_sync_finalize

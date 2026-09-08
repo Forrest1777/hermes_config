@@ -1,5 +1,7 @@
 model:
-  default: gpt-5.6-sol
+  default: gpt-5.6-terra
+  #default: gpt-5.6-sol
+  #default: gpt-6-astra
   provider: openai-codex
   base_url: https://chatgpt.com/backend-api/codex
 agent:
@@ -211,6 +213,7 @@ plugins:
   enabled:
     - godot-lsp
     - governance-guard
+    - execution-governance
     - gwrm-lifecycle-cleanup
     - gwrm-gut-runner
     - operational-block-completion-guard

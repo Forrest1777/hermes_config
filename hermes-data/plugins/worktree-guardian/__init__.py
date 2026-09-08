@@ -23,6 +23,7 @@ TOOLSET = "worktree_guardian"
 PREPARE_PROFILES = {"implementation-orchestrator"}
 VERIFY_PROFILES = {"implementation-worker", "implementation-architect"}
 ALLOWED_TARGET_PROFILES = VERIFY_PROFILES
+LIFECYCLE_PROFILES = {"implementation-orchestrator"}
 
 PREPARE_SCHEMA = {
     "name": "worktree_guardian_prepare",
@@ -43,7 +44,12 @@ PREPARE_SCHEMA = {
             },
             "base_ref": {
                 "type": "string",
-                "description": "Expected immutable base ref/commit. If omitted, the plugin tries to read base_ref from the card body.",
+                "description": (
+                    "Optional immutable-base assertion. When the active root has a canonical "
+                    "operational checkpoint, its integration_head is authoritative and this value "
+                    "must resolve to the same commit. Without a canonical checkpoint, legacy "
+                    "behavior falls back to this value or base_ref from the card body."
+                ),
             },
             "repo_root": {
                 "type": "string",
@@ -134,6 +140,12 @@ def _cfg() -> dict[str, Any]:
             "process_settle_seconds": 1,
         },
         "stale_index_lock": {"min_age_seconds": 120},
+        "lifecycle": {
+            "enabled": True,
+            "remove_integrated_child_worktrees": True,
+            "delete_integrated_child_branches": True,
+            "command_timeout_seconds": 60,
+        },
     }
     try:
         from hermes_cli.config import load_config
@@ -143,7 +155,7 @@ def _cfg() -> dict[str, Any]:
             for key in ("workspace_root", "holding_assignee", "required_files", "validation_timeout_seconds"):
                 if key in raw:
                     defaults[key] = raw[key]
-            for section in ("provisioning", "stale_index_lock"):
+            for section in ("provisioning", "stale_index_lock", "lifecycle"):
                 incoming = raw.get(section)
                 if isinstance(incoming, dict):
                     defaults[section].update(incoming)
@@ -343,6 +355,291 @@ def _resolve_commit(repo_root: Path, ref: str, timeout: int) -> str:
     return p.stdout.strip()
 
 
+def _strip_scalar(value: Any) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1].strip()
+    return text
+
+
+def _extract_checkpoint_mapping(body: str) -> Optional[dict[str, Any]]:
+    """Parse a canonical root checkpoint comment without depending on root prose/body."""
+    raw = str(body or "").strip()
+    if "operational_checkpoint" not in raw.lower():
+        return None
+    lines = raw.splitlines()
+    if lines and lines[0].startswith("OPERATIONAL_CHECKPOINT_CANONICAL"):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        raw = "\n".join(lines)
+    elif lines and lines[0].lower().startswith("operational_checkpoint (canonical"):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        raw = "\n".join(lines)
+
+    # Prefer PyYAML when available (Hermes/operational-sync already uses it), but
+    # keep a narrow scalar fallback so this safety path does not become import-fragile.
+    try:
+        import yaml
+        parsed = yaml.safe_load(raw)
+        if isinstance(parsed, dict):
+            nested = parsed.get("operational_checkpoint")
+            nested = nested if isinstance(nested, dict) else {}
+            cp: dict[str, Any] = {}
+            for key in (
+                "phase_id", "status", "integration_target_branch", "phase_base_commit",
+                "integration_head", "code_head", "docs_head", "architecture_revision",
+            ):
+                if key in parsed:
+                    cp[key] = parsed[key]
+                elif key in nested:
+                    cp[key] = nested[key]
+            cp["version"] = nested.get("version", parsed.get("version", 1))
+            return cp
+    except Exception:
+        pass
+
+    # Minimal fallback for the canonical YAML shape.
+    cp: dict[str, Any] = {}
+    for key in (
+        "phase_id", "status", "integration_target_branch", "phase_base_commit",
+        "integration_head", "code_head", "docs_head", "architecture_revision", "version",
+    ):
+        matches = re.findall(rf"(?mi)^\s*{re.escape(key)}\s*:\s*([^#\r\n]+)", raw)
+        if matches:
+            cp[key] = _strip_scalar(matches[-1])
+    return cp or None
+
+
+def _latest_operational_checkpoint(conn: Any, root_id: str) -> tuple[Optional[dict[str, Any]], Optional[int]]:
+    rows = conn.execute(
+        "SELECT id, body FROM task_comments WHERE task_id = ? ORDER BY id DESC LIMIT 120",
+        (root_id,),
+    ).fetchall()
+    for row in rows:
+        cp = _extract_checkpoint_mapping(str(row["body"] or ""))
+        if not isinstance(cp, dict):
+            continue
+        integration_head = _strip_scalar(cp.get("integration_head") or cp.get("code_head"))
+        phase_id = _strip_scalar(cp.get("phase_id"))
+        target_branch = _strip_scalar(cp.get("integration_target_branch"))
+        if integration_head and phase_id and target_branch:
+            cp["integration_head"] = integration_head
+            cp["phase_id"] = phase_id
+            cp["integration_target_branch"] = target_branch
+            return cp, int(row["id"])
+    return None, None
+
+
+def _upsert_body_scalar(body: str, key: str, value: str) -> str:
+    """Reconcile one top-level-ish YAML scalar while preserving surrounding card prose."""
+    body = str(body or "")
+    pattern = re.compile(rf"(?mi)^(?P<prefix>[ \t]*{re.escape(key)}\s*:\s*)(?P<value>[^\r\n]*)$")
+    if pattern.search(body):
+        return pattern.sub(lambda m: f"{m.group('prefix')}{value}", body, count=1)
+    suffix = "" if not body or body.endswith("\n") else "\n"
+    return f"{body}{suffix}{key}: {value}\n"
+
+
+def _reconcile_target_base_metadata(kb: Any, conn: Any, target: Any, target_id: str, base_commit: str, board: Optional[str]) -> bool:
+    body = str(getattr(target, "body", "") or "")
+    updated = _upsert_body_scalar(body, "base_ref", base_commit)
+    updated = _upsert_body_scalar(updated, "created_from_commit", base_commit)
+    if updated == body:
+        return False
+    with kb.write_txn(conn):
+        changed = conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (updated, target_id)).rowcount
+        if changed != 1:
+            raise RuntimeError("failed to reconcile target base metadata")
+    setattr(target, "body", updated)
+    _notify(kb, conn, target_id, board, ["body"])
+    return True
+
+
+def _root_workspace_for_checkpoint(root: Any, workspace_root: Path) -> Path:
+    env_workspace = str(os.environ.get("HERMES_KANBAN_WORKSPACE") or "").strip()
+    task_workspace = str(getattr(root, "workspace_path", "") or "").strip()
+    raw = env_workspace or task_workspace
+    if not raw:
+        raise RuntimeError("canonical checkpoint exists but active root workspace is unavailable")
+    workspace = Path(raw).resolve(strict=False)
+    if not _under(workspace, workspace_root):
+        raise RuntimeError("active root workspace is outside configured workspace_root")
+    if not workspace.is_dir():
+        raise RuntimeError("active root workspace does not exist")
+    return workspace
+
+
+def _resolve_checkpoint_base(
+    conn: Any,
+    root: Any,
+    root_id: str,
+    repo_root: Path,
+    workspace_root: Path,
+    timeout: int,
+    explicit_base_ref: str,
+) -> Optional[dict[str, Any]]:
+    """Resolve integration_head as the authoritative next-child base when checkpointed.
+
+    Returns None only for legacy roots with no canonical checkpoint. Once a checkpoint
+    exists, every mismatch fails closed: root HEAD, common repository, target repo
+    visibility, branch identity, and any explicit base_ref assertion.
+    """
+    cp, comment_id = _latest_operational_checkpoint(conn, root_id)
+    if cp is None:
+        return None
+
+    checkpoint_ref = _strip_scalar(cp.get("integration_head") or cp.get("code_head"))
+    if not checkpoint_ref:
+        raise RuntimeError("canonical operational checkpoint is missing integration_head")
+
+    root_workspace = _root_workspace_for_checkpoint(root, workspace_root)
+    root_common = _repo_common(root_workspace, timeout)
+    target_common = _repo_common(repo_root, timeout)
+    if root_common is None or target_common is None or root_common != target_common:
+        raise RuntimeError("active root workspace and target repo_root do not share the same Git common directory")
+
+    root_head = _resolve_commit(root_workspace, "HEAD", timeout)
+    checkpoint_commit = _resolve_commit(repo_root, checkpoint_ref, timeout)
+    if root_head != checkpoint_commit:
+        raise RuntimeError(
+            f"operational checkpoint integration_head diverges from active root HEAD: "
+            f"{checkpoint_commit} != {root_head}"
+        )
+
+    checkpoint_branch = _strip_scalar(cp.get("integration_target_branch"))
+    current_branch = _run_git(root_workspace, ["branch", "--show-current"], timeout)
+    root_branch = current_branch.stdout.strip() if current_branch.returncode == 0 else ""
+    if checkpoint_branch.startswith("refs/heads/"):
+        checkpoint_branch = checkpoint_branch[len("refs/heads/"):]
+    if checkpoint_branch and root_branch and checkpoint_branch != root_branch:
+        raise RuntimeError(
+            f"operational checkpoint integration_target_branch diverges from active root branch: "
+            f"{checkpoint_branch} != {root_branch}"
+        )
+
+    assertion = str(explicit_base_ref or "").strip()
+    if assertion:
+        asserted_commit = _resolve_commit(repo_root, assertion, timeout)
+        if asserted_commit != checkpoint_commit:
+            raise RuntimeError(
+                f"explicit base_ref assertion diverges from canonical integration_head: "
+                f"{asserted_commit} != {checkpoint_commit}"
+            )
+
+    return {
+        "base_commit": checkpoint_commit,
+        "base_source": "operational_checkpoint.integration_head",
+        "checkpoint_comment_id": comment_id,
+        "checkpoint_version": cp.get("version"),
+        "root_workspace": str(root_workspace),
+        "root_head": root_head,
+        "root_branch": root_branch or None,
+        "integration_target_branch": checkpoint_branch or None,
+    }
+
+
+
+# HERMES_GOVERNED_RECOVERY_REPLACEMENT_2026_09_07
+_RECOVERY_SIGNED_MARKER = "GOVERNANCE_RECOVERY_REPLACEMENT_AUTHORIZED"
+
+
+def _body_scalar(body: str, key: str) -> str:
+    match = re.search(rf"(?mi)^\s*{re.escape(key)}\s*:\s*[\"']?([^\s\"']+)", str(body or ""))
+    return str(match.group(1)).strip() if match else ""
+
+
+def _signed_recovery_comment(conn: Any, target_id: str, case_id: str, checkpoint: str) -> tuple[Optional[dict[str, str]], Optional[int]]:
+    rows = conn.execute(
+        "SELECT id, author, body FROM task_comments WHERE task_id=? ORDER BY id DESC LIMIT 120",
+        (target_id,),
+    ).fetchall()
+    for row in rows:
+        if str(row["author"] or "") != "governance-guard":
+            continue
+        body = str(row["body"] or "")
+        if _RECOVERY_SIGNED_MARKER not in body:
+            continue
+        fields: dict[str, str] = {}
+        for key in (
+            "root_task_id", "supersedes_task_id", "replacement_task_id", "case_id",
+            "recovery_checkpoint", "status_sha256", "target_profile",
+        ):
+            fields[key] = _body_scalar(body, key)
+        if fields.get("case_id") != case_id or fields.get("recovery_checkpoint") != checkpoint:
+            continue
+        if fields.get("replacement_task_id") != target_id:
+            continue
+        return fields, int(row["id"])
+    return None, None
+
+
+def _resolve_governed_recovery_base(
+    conn: Any,
+    root: Any,
+    root_id: str,
+    target: Any,
+    target_id: str,
+    target_profile: str,
+    repo_root: Path,
+    workspace_root: Path,
+    timeout: int,
+    explicit_base_ref: str,
+) -> Optional[dict[str, Any]]:
+    body = str(getattr(target, "body", "") or "")
+    if _body_scalar(body, "recovery_replacement").lower() not in {"true", "1", "yes"}:
+        return None
+    case_id = _body_scalar(body, "recovery_case_id")
+    checkpoint_ref = _body_scalar(body, "recovery_checkpoint")
+    supersedes = _body_scalar(body, "supersedes_card_id")
+    signed_profile = _body_scalar(body, "recovery_target_profile")
+    if not case_id or not checkpoint_ref or not supersedes or not signed_profile:
+        raise RuntimeError("recovery replacement metadata is incomplete")
+    if signed_profile != target_profile:
+        raise RuntimeError("target_profile diverges from governed recovery authorization")
+
+    checkpoint_commit = _resolve_commit(repo_root, checkpoint_ref, timeout)
+    assertion = str(explicit_base_ref or _extract_base_ref(body) or "").strip()
+    if assertion and _resolve_commit(repo_root, assertion, timeout) != checkpoint_commit:
+        raise RuntimeError("explicit/card base_ref diverges from governed recovery checkpoint")
+
+    signed, signed_comment_id = _signed_recovery_comment(conn, target_id, case_id, checkpoint_commit)
+    if signed is None:
+        # The signer writes the canonical full SHA. A body abbreviated SHA is not enough.
+        signed, signed_comment_id = _signed_recovery_comment(conn, target_id, case_id, checkpoint_ref)
+    if signed is None:
+        raise RuntimeError("recovery replacement lacks governance-guard signed authorization comment")
+    if signed.get("root_task_id") != root_id or signed.get("supersedes_task_id") != supersedes:
+        raise RuntimeError("signed recovery lineage does not match active root/old card")
+    if signed.get("target_profile") != target_profile:
+        raise RuntimeError("signed recovery target profile mismatch")
+
+    old = conn.execute("SELECT status FROM tasks WHERE id=?", (supersedes,)).fetchone()
+    if old is None or str(old["status"] or "") != "archived":
+        raise RuntimeError("superseded recovery predecessor is not archived")
+
+    canonical = _resolve_checkpoint_base(
+        conn, root, root_id, repo_root, workspace_root, timeout, ""
+    )
+    if canonical is None:
+        raise RuntimeError("governed recovery replacement requires canonical root checkpoint")
+    integration_commit = str(canonical["base_commit"])
+    anc = _run_git(repo_root, ["merge-base", "--is-ancestor", integration_commit, checkpoint_commit], timeout)
+    if anc.returncode != 0:
+        raise RuntimeError("recovery checkpoint does not descend from canonical integration_head")
+
+    return {
+        **canonical,
+        "base_commit": checkpoint_commit,
+        "base_source": "governance_recovery_checkpoint",
+        "recovery_case_id": case_id,
+        "recovery_predecessor_task_id": supersedes,
+        "recovery_authorization_comment_id": signed_comment_id,
+        "canonical_integration_head": integration_commit,
+    }
+
 def _branch_tip(repo_root: Path, branch: str, timeout: int) -> Optional[str]:
     p = _run_git(repo_root, ["show-ref", "--verify", "--hash", f"refs/heads/{branch}"], timeout)
     return p.stdout.strip() if p.returncode == 0 else None
@@ -528,7 +825,16 @@ def _validate_worktree(
                     break
         result["missing_tracked_files"] = missing
         if missing:
-            result["errors"].append("tracked files missing from working tree")
+            if result.get("authorized_retry_checkpoint"):
+                # HERMES_AUTHORIZED_DIRTY_RETRY_DELETIONS_2026_09_08
+                # The Governor authorization is bound to workspace + HEAD +
+                # exact git-status SHA256. Therefore tracked files already
+                # absent inside that signed dirty checkpoint are preserved WIP,
+                # not evidence of incomplete fresh provisioning. Keep the list
+                # in validation output for audit, but do not fail this gate.
+                result["authorized_missing_tracked_files"] = list(missing)
+            else:
+                result["errors"].append("tracked files missing from working tree")
 
         index_q = _run_git(real, ["rev-parse", "--path-format=absolute", "--git-path", "index"], timeout)
         lock_q = _run_git(real, ["rev-parse", "--path-format=absolute", "--git-path", "index.lock"], timeout)
@@ -689,6 +995,335 @@ def _cleanup_partial_worktree(repo_root: Path, target: Path, cfg: dict[str, Any]
         "target_exists_after": target.exists(),
     }
 
+
+# HERMES_WORKTREE_LIFECYCLE_2026_09_07
+# Post-root lifecycle for the no-agent-push workflow.
+#
+# Hermes core already attempts task-worktree cleanup on completion, but it
+# deliberately preserves commits that are not reachable from remote-tracking
+# refs. In this environment agents never push. Once the orchestrator root is
+# complete, a child worktree is safe to remove when Git proves its HEAD is
+# already contained in the root integration branch. Root cleanup itself is
+# intentionally out of scope here and remains gated on MAIN_INTEGRATED.
+
+_TERMINAL_LIFECYCLE_STATUSES = {"done", "archived", "failed", "cancelled"}
+
+
+def _extract_context_value(body: str, key: str) -> Optional[str]:
+    key_re = re.escape(key)
+    patterns = (
+        rf'(?mi)^\s*{key_re}\s*:\s*["\']?([^\s"\']+)',
+        rf'["\']{key_re}["\']\s*:\s*["\']([^"\']+)["\']',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, body or "")
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _normalize_branch_name(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    branch = str(value).strip()
+    prefix = "refs/heads/"
+    if branch.startswith(prefix):
+        branch = branch[len(prefix):]
+    return branch or None
+
+
+def _safe_finalize_integrated_child_worktree(
+    *,
+    repo_root: Path,
+    root_workspace: Path,
+    root_branch: str,
+    child_id: str,
+    child_workspace: Path,
+    child_branch: Optional[str],
+    cfg: dict[str, Any],
+) -> dict[str, Any]:
+    lifecycle = cfg.get("lifecycle") or {}
+    timeout = max(1, int(lifecycle.get("command_timeout_seconds", 60)))
+    workspace_root = Path(str(cfg.get("workspace_root", "/workspace"))).resolve(strict=False)
+    target = child_workspace.resolve(strict=False)
+    repo_root = repo_root.resolve(strict=False)
+    root_workspace = root_workspace.resolve(strict=False)
+
+    result: dict[str, Any] = {
+        "child_task_id": child_id,
+        "workspace": str(target),
+        "branch": child_branch,
+        "root_branch": root_branch,
+        "changed": False,
+        "preserved": True,
+    }
+
+    if not _under(target, workspace_root):
+        return {**result, "reason": "workspace_outside_configured_root"}
+    if target == repo_root or target == root_workspace:
+        return {**result, "reason": "refusing_root_or_main_checkout"}
+    if not target.is_dir():
+        return {**result, "ok": True, "preserved": False, "reason": "workspace_already_absent"}
+
+    common = _repo_common(repo_root, timeout)
+    if common is None:
+        return {**result, "reason": "cannot_resolve_repo_common_dir"}
+
+    block = _parse_worktree_block(repo_root, target, timeout)
+    if block is None:
+        return {**result, "reason": "workspace_not_registered_as_worktree"}
+
+    active = _active_git_process(target, common, repo_root)
+    if active:
+        return {**result, "reason": "active_git_process", "process": active}
+
+    status = _run_git(target, ["status", "--porcelain=v1", "--untracked-files=all"], timeout)
+    if status.returncode != 0:
+        return {
+            **result,
+            "reason": "git_status_failed",
+            "stderr": (status.stderr or "")[-1000:],
+        }
+    if status.stdout.strip():
+        return {
+            **result,
+            "reason": "dirty_worktree",
+            "status_preview": status.stdout.strip()[:1500],
+        }
+
+    head_q = _run_git(target, ["rev-parse", "--verify", "HEAD^{commit}"], timeout)
+    if head_q.returncode != 0:
+        return {**result, "reason": "cannot_resolve_child_head"}
+    child_head = head_q.stdout.strip()
+
+    root_tip_q = _run_git(repo_root, ["rev-parse", "--verify", f"{root_branch}^{{commit}}"], timeout)
+    if root_tip_q.returncode != 0:
+        return {**result, "reason": "cannot_resolve_root_branch"}
+    root_tip = root_tip_q.stdout.strip()
+
+    ancestor = _run_git(repo_root, ["merge-base", "--is-ancestor", child_head, root_tip], timeout)
+    if ancestor.returncode == 1:
+        return {
+            **result,
+            "reason": "child_head_not_preserved_in_root_branch",
+            "child_head": child_head,
+            "root_tip": root_tip,
+        }
+    if ancestor.returncode != 0:
+        return {
+            **result,
+            "reason": "ancestry_check_failed",
+            "child_head": child_head,
+            "root_tip": root_tip,
+            "stderr": (ancestor.stderr or "")[-1000:],
+        }
+
+    remove = _run_mutating_process_group(
+        ["git", "-C", str(repo_root), "worktree", "remove", str(target)],
+        timeout,
+    )
+    if remove.get("timed_out") or remove.get("returncode") != 0 or target.exists():
+        return {
+            **result,
+            "reason": "git_worktree_remove_failed",
+            "child_head": child_head,
+            "root_tip": root_tip,
+            "remove": remove,
+            "target_exists_after": target.exists(),
+        }
+
+    prune = _run_mutating_process_group(
+        ["git", "-C", str(repo_root), "worktree", "prune"],
+        timeout,
+    )
+
+    branch_delete = None
+    branch = _normalize_branch_name(child_branch)
+    if (
+        bool(lifecycle.get("delete_integrated_child_branches", True))
+        and branch
+        and branch.startswith("wt/")
+        and branch != root_branch
+        and root_workspace.is_dir()
+    ):
+        current = _run_git(root_workspace, ["branch", "--show-current"], timeout)
+        if current.returncode == 0 and current.stdout.strip() == root_branch:
+            # Run -d from the root integration worktree. Git independently
+            # verifies that the child branch is merged into the checked-out
+            # root branch; no forced branch deletion is used.
+            branch_delete = _run_mutating_process_group(
+                ["git", "-C", str(root_workspace), "branch", "-d", branch],
+                timeout,
+            )
+
+    return {
+        **result,
+        "ok": True,
+        "changed": True,
+        "preserved": False,
+        "reason": "integrated_child_worktree_removed",
+        "child_head": child_head,
+        "root_tip": root_tip,
+        "remove": remove,
+        "prune": prune,
+        "branch_delete": branch_delete,
+    }
+
+
+def _lifecycle_on_task_completed(
+    task_id=None,
+    profile_name=None,
+    board=None,
+    assignee=None,
+    run_id=None,
+    summary=None,
+    **kwargs,
+):
+    profile = str(profile_name or _profile() or "")
+    if profile not in LIFECYCLE_PROFILES:
+        return None
+    if not isinstance(task_id, str) or not task_id.startswith("t_"):
+        return None
+
+    cfg = _cfg()
+    lifecycle = cfg.get("lifecycle") or {}
+    if not bool(lifecycle.get("enabled", True)):
+        return None
+    if not bool(lifecycle.get("remove_integrated_child_worktrees", True)):
+        return None
+
+    try:
+        from hermes_cli import kanban_db_connect as kbc
+
+        with kbc.connect_closing(board=board) as conn:
+            root = conn.execute(
+                """
+                SELECT id, status, assignee, body, workspace_kind,
+                       workspace_path, branch_name
+                  FROM tasks
+                 WHERE id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if not root or root["status"] != "done":
+                return None
+            if str(root["assignee"] or "") != "implementation-orchestrator":
+                return None
+            if root["workspace_kind"] != "worktree" or not root["workspace_path"]:
+                return None
+
+            root_branch = _normalize_branch_name(root["branch_name"]) or f"wt/{task_id}"
+            # Canonical phase roots use wt/<root-card-id>. Fail closed instead
+            # of treating an arbitrary orchestrator worktree as a phase root.
+            if root_branch != f"wt/{task_id}":
+                _audit({
+                    "event": "lifecycle_root_skipped",
+                    "root_task_id": task_id,
+                    "reason": "noncanonical_root_branch",
+                    "branch": root_branch,
+                })
+                return None
+
+            root_workspace = Path(str(root["workspace_path"])).resolve(strict=False)
+            workspace_root = Path(str(cfg.get("workspace_root", "/workspace"))).resolve(strict=False)
+            try:
+                repo_root = _infer_repo_root(root_workspace, None, workspace_root)
+            except Exception as exc:
+                _audit({
+                    "event": "lifecycle_root_skipped",
+                    "root_task_id": task_id,
+                    "reason": "cannot_infer_repo_root",
+                    "error": f"{type(exc).__name__}: {exc}"[:1000],
+                })
+                return None
+
+            candidates = conn.execute(
+                """
+                SELECT id, status, body, workspace_kind, workspace_path,
+                       branch_name, assignee
+                  FROM tasks
+                 WHERE id <> ?
+                   AND workspace_kind = 'worktree'
+                   AND workspace_path IS NOT NULL
+                """,
+                (task_id,),
+            ).fetchall()
+
+            results: list[dict[str, Any]] = []
+            for child in candidates:
+                child_id = str(child["id"] or "")
+                body = str(child["body"] or "")
+                parent_id = (
+                    _extract_context_value(body, "parent_card_id")
+                    or _extract_context_value(body, "logical_parent_card_id")
+                )
+                integration_target = _normalize_branch_name(
+                    _extract_context_value(body, "integration_target_branch")
+                )
+
+                # Prefer explicit TASK CONTEXT PACKET parentage. If an older
+                # card lacks that field, accept the existing conservative
+                # relation predicate, but still require an exact integration
+                # target match to this root branch.
+                related = parent_id == task_id
+                if not related and not parent_id:
+                    related = _related(conn, task_id, child_id, body)
+                if not related or integration_target != root_branch:
+                    continue
+
+                if str(child["status"] or "") not in _TERMINAL_LIFECYCLE_STATUSES:
+                    results.append({
+                        "child_task_id": child_id,
+                        "changed": False,
+                        "preserved": True,
+                        "reason": "child_not_terminal",
+                        "status": child["status"],
+                    })
+                    continue
+
+                child_workspace = Path(str(child["workspace_path"])).resolve(strict=False)
+                if child_workspace == root_workspace:
+                    results.append({
+                        "child_task_id": child_id,
+                        "changed": False,
+                        "preserved": True,
+                        "reason": "child_workspace_equals_root_workspace",
+                    })
+                    continue
+
+                outcome = _safe_finalize_integrated_child_worktree(
+                    repo_root=repo_root,
+                    root_workspace=root_workspace,
+                    root_branch=root_branch,
+                    child_id=child_id,
+                    child_workspace=child_workspace,
+                    child_branch=_normalize_branch_name(child["branch_name"]),
+                    cfg=cfg,
+                )
+                results.append(outcome)
+
+            cleaned = sum(1 for item in results if item.get("changed"))
+            preserved = sum(1 for item in results if item.get("preserved"))
+            _audit({
+                "event": "lifecycle_root_completed",
+                "root_task_id": task_id,
+                "root_branch": root_branch,
+                "root_workspace": str(root_workspace),
+                "run_id": run_id,
+                "children_considered": len(results),
+                "cleaned": cleaned,
+                "preserved": preserved,
+                "results": results,
+            })
+    except Exception as exc:
+        # Observer hook: completion must remain durable even when lifecycle
+        # cleanup cannot run. Fail closed and preserve worktrees.
+        _audit({
+            "event": "lifecycle_hook_error",
+            "root_task_id": task_id,
+            "error": f"{type(exc).__name__}: {exc}"[:1500],
+        })
+    return None
 
 def _attempt_timeout(cfg: dict[str, Any], attempt: int) -> int:
     prov = cfg.get("provisioning") or {}
@@ -908,10 +1543,32 @@ def _prepare_handler(args: dict, **kwargs: Any) -> str:
                 kb.set_branch_name(conn, target_id, expected_branch)
                 setattr(target, "branch_name", expected_branch)
                 _notify(kb, conn, target_id, board, ["branch_name"])
-            base_ref = str(args.get("base_ref") or _extract_base_ref(str(getattr(target, "body", "") or "")) or "").strip()
-            if not base_ref:
-                return _err("base_ref is required and could not be derived from card body")
-            base_commit = _resolve_commit(repo_root, base_ref, int(cfg.get("validation_timeout_seconds", 60)))
+            timeout = int(cfg.get("validation_timeout_seconds", 60))
+            explicit_base_ref = str(args.get("base_ref") or "").strip()
+            checkpoint_base = _resolve_governed_recovery_base(
+                conn, root, root_id, target, target_id, target_profile,
+                repo_root, workspace_root, timeout, explicit_base_ref
+            )
+            if checkpoint_base is None:
+                checkpoint_base = _resolve_checkpoint_base(
+                    conn, root, root_id, repo_root, workspace_root, timeout, explicit_base_ref
+                )
+            if checkpoint_base is not None:
+                base_commit = str(checkpoint_base["base_commit"])
+                base_source = str(checkpoint_base["base_source"])
+                base_metadata_reconciled = _reconcile_target_base_metadata(
+                    kb, conn, target, target_id, base_commit, board
+                )
+            else:
+                # Compatibility path for old/non-checkpointed roots. New orchestrated flows
+                # must keep a canonical root checkpoint and therefore use the branch above.
+                legacy_ref = str(explicit_base_ref or _extract_base_ref(str(getattr(target, "body", "") or "")) or "").strip()
+                if not legacy_ref:
+                    return _err("base_ref is required when the active root has no canonical operational checkpoint")
+                base_commit = _resolve_commit(repo_root, legacy_ref, timeout)
+                base_source = "legacy_explicit_or_card_body"
+                base_metadata_reconciled = False
+                checkpoint_base = {}
 
             existing = _validate_worktree(
                 target_path,
@@ -932,8 +1589,8 @@ def _prepare_handler(args: dict, **kwargs: Any) -> str:
                 )
                 if not activation.get("ok"):
                     return _err("worktree valid but assignee-fence release failed", validation=existing, activation=activation, human_required=True)
-                _add_comment(kb, conn, target_id, f"WORKTREE_GUARDIAN_PREPARED\nroot_task_id: {root_id}\ntarget_profile: {target_profile}\nholding_assignee: {holding_assignee}\nbase_ref: {base_commit}\nbranch: {expected_branch}\nworkspace: {target_path}\nprovisioning: existing_valid\n")
-                payload = {"event": "prepare_existing_valid", "root_task_id": root_id, "target_task_id": target_id, "workspace": str(target_path), "branch": expected_branch, "base_commit": base_commit, "target_profile": target_profile, "activation": activation, "resulting_status": activation.get("resulting_status")}
+                _add_comment(kb, conn, target_id, f"WORKTREE_GUARDIAN_PREPARED\nroot_task_id: {root_id}\ntarget_profile: {target_profile}\nholding_assignee: {holding_assignee}\nbase_ref: {base_commit}\nbase_source: {base_source}\ncheckpoint_comment_id: {checkpoint_base.get('checkpoint_comment_id')}\nbranch: {expected_branch}\nworkspace: {target_path}\nprovisioning: existing_valid\n")
+                payload = {"event": "prepare_existing_valid", "root_task_id": root_id, "target_task_id": target_id, "workspace": str(target_path), "branch": expected_branch, "base_commit": base_commit, "base_source": base_source, "base_metadata_reconciled": base_metadata_reconciled, "checkpoint_comment_id": checkpoint_base.get("checkpoint_comment_id"), "root_head": checkpoint_base.get("root_head"), "target_profile": target_profile, "activation": activation, "resulting_status": activation.get("resulting_status")}
                 _audit(payload)
                 return _ok(prepared=True, released=True, validation=existing, **payload)
 
@@ -994,8 +1651,8 @@ def _prepare_handler(args: dict, **kwargs: Any) -> str:
                     )
                     if not activation.get("ok"):
                         return _err("provisioned worktree passed but assignee-fence release failed", human_required=True, attempts=attempts, validation=validation, activation=activation)
-                    _add_comment(kb, conn, target_id, f"WORKTREE_GUARDIAN_PREPARED\nroot_task_id: {root_id}\ntarget_profile: {target_profile}\nholding_assignee: {holding_assignee}\nattempt: {attempt}\ntimeout_seconds: {timeout}\nbase_ref: {base_commit}\nbranch: {expected_branch}\nworkspace: {target_path}\n")
-                    payload = {"event": "prepare_success", "root_task_id": root_id, "target_task_id": target_id, "workspace": str(target_path), "branch": expected_branch, "base_commit": base_commit, "target_profile": target_profile, "attempt": attempt, "timeout_seconds": timeout, "activation": activation, "resulting_status": activation.get("resulting_status")}
+                    _add_comment(kb, conn, target_id, f"WORKTREE_GUARDIAN_PREPARED\nroot_task_id: {root_id}\ntarget_profile: {target_profile}\nholding_assignee: {holding_assignee}\nattempt: {attempt}\ntimeout_seconds: {timeout}\nbase_ref: {base_commit}\nbase_source: {base_source}\ncheckpoint_comment_id: {checkpoint_base.get('checkpoint_comment_id')}\nbranch: {expected_branch}\nworkspace: {target_path}\n")
+                    payload = {"event": "prepare_success", "root_task_id": root_id, "target_task_id": target_id, "workspace": str(target_path), "branch": expected_branch, "base_commit": base_commit, "base_source": base_source, "base_metadata_reconciled": base_metadata_reconciled, "checkpoint_comment_id": checkpoint_base.get("checkpoint_comment_id"), "root_head": checkpoint_base.get("root_head"), "target_profile": target_profile, "attempt": attempt, "timeout_seconds": timeout, "activation": activation, "resulting_status": activation.get("resulting_status")}
                     _audit(payload)
                     return _ok(prepared=True, released=True, attempts=attempts, validation=validation, **payload)
 
@@ -1134,4 +1791,8 @@ def register(ctx: Any) -> None:
         handler=_recover_handler,
         check_fn=_prepare_available,
         emoji="🛡️",
+    )
+    ctx.register_hook(
+        "kanban_task_completed",
+        _lifecycle_on_task_completed,
     )
