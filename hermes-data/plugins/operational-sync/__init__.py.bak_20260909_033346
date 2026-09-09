@@ -614,88 +614,11 @@ def _synchronize_workspace(
             }
         raise RuntimeError("checkpoint claims docs synchronized but current HEAD does not match docs_head")
 
+    if current != code_head:
+        raise RuntimeError(f"current HEAD must equal checkpoint integration/code head before sync: {current} != {code_head}")
     clean, detail = _git_clean(workspace, timeout)
     if not clean:
         raise RuntimeError(f"integration worktree must be clean before operational sync: {detail[:1200]}")
-
-    if current != code_head:
-        # HERMES_OPERATIONAL_SYNC_PARTIAL_SUCCESS_RECOVERY_2026_09_09
-        # Recover only the exact partial-success shape produced when the docs commit
-        # succeeded but canonical checkpoint publication failed afterwards.
-        parent = _resolve_commit(workspace, f"{current}^", timeout)
-        subject_p = _git(workspace, ["show", "-s", "--format=%s", current], timeout)
-        subject = subject_p.stdout.strip() if subject_p.returncode == 0 else ""
-        expected_subject = f"docs(operational): sync {phase_id} after consolidated gate"
-        docs = cfg["docs"]
-        evidence_rel = f"{str(docs['evidence_dir']).rstrip('/')}/{_slug(phase_id)}-gate-evidence.md"
-        changed_p = _git(
-            workspace,
-            ["diff", "--name-only", f"{code_head}..{current}", "--"],
-            timeout,
-        )
-        changed_commit_paths = [
-            line.strip() for line in changed_p.stdout.splitlines() if line.strip()
-        ] if changed_p.returncode == 0 else []
-        required_generated = {
-            evidence_rel,
-            str(docs["estado_atual"]),
-            str(docs["indice"]),
-            str(docs["manifest_md"]),
-            str(docs["implementation_manifest"]),
-        }
-        unexpected_generated = [
-            path for path in changed_commit_paths
-            if not _allowed_generated_path(path, evidence_rel, cfg)
-        ]
-        evidence_path = workspace / evidence_rel
-        evidence_text = (
-            evidence_path.read_text(encoding="utf-8")
-            if evidence_path.is_file()
-            else ""
-        )
-        evidence_matches = all(
-            token in evidence_text
-            for token in (root_task_id, gate_task_id, code_head)
-        )
-        exact_partial_success = (
-            parent == code_head
-            and subject == expected_subject
-            and bool(changed_commit_paths)
-            and required_generated.issubset(set(changed_commit_paths))
-            and not unexpected_generated
-            and evidence_matches
-        )
-        if exact_partial_success:
-            phase_base_resolved = _resolve_commit(workspace, phase_base, timeout)
-            if not phase_base_resolved:
-                raise RuntimeError("partial-success recovery cannot resolve phase_base_commit")
-            delta_paths = _graphify_delta_paths(
-                workspace, phase_base_resolved, code_head, timeout
-            )
-            graphify_mode = str(args.get("graphify_mode") or "auto").strip().lower()
-            graphify_required = graphify_mode == "force" or _graphify_required(delta_paths)
-            return {
-                "idempotent": False,
-                "recovered_partial_success": True,
-                "phase_id": phase_id,
-                "branch": branch,
-                "phase_base_commit": phase_base_resolved,
-                "code_head": code_head,
-                "docs_head": current,
-                "architecture_revision": architecture_revision,
-                "evidence_artifact": evidence_rel,
-                "graphify_required": graphify_required,
-                "graphify_ran": any(
-                    path.startswith("graphify-out/") for path in changed_commit_paths
-                ),
-                "graphify_result": None,
-                "delta_paths": delta_paths,
-                "changed_paths": changed_commit_paths,
-            }
-        raise RuntimeError(
-            "current HEAD differs from checkpoint code head and is not an exact "
-            f"recoverable operational-sync partial success: {current} != {code_head}"
-        )
 
     resolved_base = _resolve_commit(workspace, phase_base, timeout)
     resolved_code = _resolve_commit(workspace, code_head, timeout)
@@ -978,7 +901,7 @@ def _finalize_handler(args: dict[str, Any], **_: Any) -> str:
                 sort_keys=False,
                 default_flow_style=False,
             ).rstrip()
-            kb.add_comment(conn, root_id, author="operational-sync", body=comment)
+            kb.add_comment(conn, root_id, comment, author="operational-sync")
             _audit({**event_base, "result": "pass", "checkpoint_comment_id": comment_id, **result})
             return _ok(
                 completion_ready=True,
