@@ -161,21 +161,13 @@ def _inspect_task(conn, task_id: str) -> dict[str, Any] | None:
 
 
 def _guarded_respawn(conn, task_id: str, *args, **kwargs):
-    # HERMES_PRESERVE_DIRTY_UID_CHECKPOINT_2026_09_09
-    # Retry guards must be observational: never mutate a dirty worktree before
-    # the native/custom retry checkpoint logic captures and classifies it.
-    task = None
+    # Clean only proven transient UIDs before any downstream retry fingerprint.
     try:
         task = _inspect_task(conn, task_id)
         if task and str(task.get("workspace_kind") or "") == "worktree":
             workspace = str(task.get("workspace_path") or "").strip()
             if workspace:
-                _audit(
-                    "transient_uid_cleanup_skipped_preserve_checkpoint",
-                    task_id=task_id,
-                    workspace=workspace,
-                    phase="pre_spawn_retry_guard",
-                )
+                _clean_transient_uids(Path(workspace))
     except Exception:
         task = None
 
@@ -220,17 +212,11 @@ def _pre_tool_call(tool_name=None, **kwargs):
     name = str(tool_name or "")
     if not name.endswith("worktree_guardian_verify"):
         return None
-
-    # HERMES_PRESERVE_DIRTY_UID_CHECKPOINT_2026_09_09
-    # Verification must never normalize/mutate the candidate checkpoint.
     workspace = str(os.environ.get("HERMES_KANBAN_WORKSPACE") or "").strip()
     if workspace:
-        _audit(
-            "transient_uid_cleanup_skipped_preserve_checkpoint",
-            task_id=str(os.environ.get("HERMES_KANBAN_TASK") or "").strip() or None,
-            workspace=workspace,
-            phase="pre_worktree_guardian_verify",
-        )
+        result = _clean_transient_uids(Path(workspace))
+        if not result.get("ok"):
+            _audit("transient_uid_cleanup_failed", workspace=workspace, error=result.get("error"))
     return None
 
 

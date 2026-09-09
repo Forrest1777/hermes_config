@@ -2390,9 +2390,6 @@ def _reconcile_error_governor(board: str, policy: dict[str, Any]) -> dict[str, A
     except Exception as exc:
         return {"ok": False, "error": f"governor_lookup_failed:{type(exc).__name__}:{exc}"[:900]}
 
-    blocked_governor = False
-    blocked_governor_evidence: dict[str, Any] | None = None
-
     if governor_task is not None:
         current_run = getattr(governor_task, "current_run_id", None)
         status = str(getattr(governor_task, "status", "") or "")
@@ -2404,106 +2401,7 @@ def _reconcile_error_governor(board: str, policy: dict[str, Any]) -> dict[str, A
                 "status": status,
                 "current_run_id": current_run,
             }
-
-        if status == "blocked":
-            # HERMES_BLOCKED_GOVERNOR_STALE_RECONCILE_2026_09_09
-            # A blocked persistent Governor may be auto-reconciled only when
-            # its block is dispatcher give-up, its latest run is terminal, and
-            # the board active_run_id is provably absent/terminal.
-            try:
-                from hermes_cli import kanban_db as kb
-                conn = _kanban_connect(board=effective_board)
-                try:
-                    latest_run = conn.execute(
-                        "SELECT id, status, outcome, ended_at "
-                        "FROM task_runs WHERE task_id = ? "
-                        "ORDER BY id DESC LIMIT 1",
-                        (governor_task_id,),
-                    ).fetchone()
-                    if latest_run is None or latest_run["ended_at"] is None:
-                        return {
-                            "ok": False,
-                            "error": "blocked_governor_latest_run_not_terminal",
-                            "governor_task_id": governor_task_id,
-                        }
-                    if str(latest_run["status"] or "") == "running":
-                        return {
-                            "ok": False,
-                            "error": "blocked_governor_latest_run_still_running",
-                            "governor_task_id": governor_task_id,
-                            "run_id": latest_run["id"],
-                        }
-
-                    last_block_transition = conn.execute(
-                        "SELECT kind, run_id, payload, created_at "
-                        "FROM task_events "
-                        "WHERE task_id = ? "
-                        "AND kind IN ('gave_up', 'blocked', 'unblocked') "
-                        "ORDER BY created_at DESC LIMIT 1",
-                        (governor_task_id,),
-                    ).fetchone()
-                    if (
-                        last_block_transition is None
-                        or str(last_block_transition["kind"] or "") != "gave_up"
-                    ):
-                        return {
-                            "ok": False,
-                            "error": "blocked_governor_not_dispatcher_give_up",
-                            "governor_task_id": governor_task_id,
-                            "last_transition": (
-                                str(last_block_transition["kind"])
-                                if last_block_transition is not None
-                                else None
-                            ),
-                        }
-
-                    active_run_id = str(entry.get("active_run_id") or "").strip()
-                    active_run_terminal = None
-                    active_run_found = False
-                    if active_run_id and active_run_id.isdigit():
-                        active_row = conn.execute(
-                            "SELECT id, task_id, status, outcome, ended_at "
-                            "FROM task_runs WHERE id = ? LIMIT 1",
-                            (int(active_run_id),),
-                        ).fetchone()
-                        active_run_found = active_row is not None
-                        if active_row is not None:
-                            active_run_terminal = (
-                                active_row["ended_at"] is not None
-                                and str(active_row["status"] or "") != "running"
-                            )
-                            if not active_run_terminal:
-                                return {
-                                    "ok": False,
-                                    "error": "board_active_run_may_still_be_live",
-                                    "active_run_id": active_run_id,
-                                    "active_run_task_id": active_row["task_id"],
-                                    "active_run_status": active_row["status"],
-                                }
-
-                    blocked_governor = True
-                    blocked_governor_evidence = {
-                        "latest_run_id": int(latest_run["id"]),
-                        "latest_run_status": latest_run["status"],
-                        "latest_run_outcome": latest_run["outcome"],
-                        "latest_run_ended_at": latest_run["ended_at"],
-                        "last_block_transition": str(last_block_transition["kind"]),
-                        "active_run_id": active_run_id or None,
-                        "active_run_found": active_run_found,
-                        "active_run_terminal": active_run_terminal,
-                    }
-                finally:
-                    conn.close()
-            except Exception as exc:
-                return {
-                    "ok": False,
-                    "error": (
-                        f"blocked_governor_evidence_failed:"
-                        f"{type(exc).__name__}:{exc}"
-                    )[:1000],
-                    "governor_task_id": governor_task_id,
-                }
-        elif status != "done":
+        if status != "done":
             return {
                 "ok": False,
                 "error": "existing_error_governor_requires_human",
@@ -2556,25 +2454,6 @@ def _reconcile_error_governor(board: str, policy: dict[str, Any]) -> dict[str, A
             "case_ids": unreadable_pending[:20],
         }
 
-    if blocked_governor:
-        # HERMES_BLOCKED_GOVERNOR_STALE_RECONCILE_2026_09_09
-        # Never auto-unblock because some unrelated case is old. The exact
-        # active case that stranded the board must itself be stale by policy.
-        if not active_case:
-            return {
-                "ok": False,
-                "error": "blocked_governor_has_no_active_case_proof",
-                "governor_task_id": governor_task_id,
-            }
-        if active_case not in set(stale_ids):
-            return {
-                "ok": False,
-                "error": "blocked_governor_active_case_not_stale",
-                "governor_task_id": governor_task_id,
-                "active_case_id": active_case,
-                "ttl_hours": ttl_hours,
-            }
-
     for case_id in stale_ids:
         if not _quarantine_stale_case(
             case_id,
@@ -2610,64 +2489,6 @@ def _reconcile_error_governor(board: str, policy: dict[str, Any]) -> dict[str, A
         board_entry["last_reconciled_stale_cases"] = list(stale_ids)
     _update_state(mutate)
 
-    governor_reactivated = False
-    governor_reactivation_error = None
-
-    if blocked_governor:
-        # HERMES_BLOCKED_GOVERNOR_STALE_RECONCILE_2026_09_09
-        # Stale active ownership has now been quarantined. Re-open through the
-        # native Kanban transition so sticky block state and failure counters
-        # are handled by Hermes rather than direct SQL.
-        try:
-            with _file_lock(_state_path()):
-                post_reconcile = _read_state_unlocked()
-            post_entry = (
-                (post_reconcile.get("governance_boards") or {}).get(effective_board)
-                or {}
-            )
-            if post_entry.get("active_case_id") or post_entry.get("active_run_id"):
-                raise RuntimeError("active ownership remained after stale reconciliation")
-            if not list(post_entry.get("pending_cases") or []):
-                raise RuntimeError("no pending governance case remains after reconciliation")
-
-            from hermes_cli import kanban_db as kb
-            conn = _kanban_connect(board=effective_board)
-            try:
-                live = kb.get_task(conn, governor_task_id)
-                if live is None:
-                    raise RuntimeError("governor task disappeared before reactivation")
-                if getattr(live, "current_run_id", None) is not None:
-                    raise RuntimeError("governor acquired current_run_id before reactivation")
-                if str(getattr(live, "status", "") or "") != "blocked":
-                    raise RuntimeError(
-                        f"governor status changed before reactivation:"
-                        f"{getattr(live, 'status', None)}"
-                    )
-                if not kb.unblock_task(conn, governor_task_id):
-                    raise RuntimeError("native unblock_task refused blocked Governor")
-                governor_reactivated = True
-            finally:
-                conn.close()
-        except Exception as exc:
-            governor_reactivation_error = f"{type(exc).__name__}: {exc}"[:1000]
-
-            def restore_error(state):
-                board_entry = _governance_board_state(state, effective_board)
-                board_entry["lifecycle"] = "ERROR"
-                board_entry["last_error_at"] = _utc_now()
-                board_entry["last_error_case_id"] = active_case
-                board_entry["last_reactivation_error"] = governor_reactivation_error
-
-            _update_state(restore_error)
-            return {
-                "ok": False,
-                "error": "blocked_governor_native_reactivation_failed",
-                "detail": governor_reactivation_error,
-                "governor_task_id": governor_task_id,
-                "stale_cases": stale_ids,
-                "evidence": blocked_governor_evidence,
-            }
-
     result = {
         "ok": True,
         "needed": True,
@@ -2677,8 +2498,6 @@ def _reconcile_error_governor(board: str, policy: dict[str, Any]) -> dict[str, A
         "stale_cases": stale_ids,
         "recent_pending_cases": recent_pending,
         "ttl_hours": ttl_hours,
-        "blocked_governor_reactivated": governor_reactivated,
-        "blocked_governor_evidence": blocked_governor_evidence,
     }
     _append_event("execution_governor_stale_reconciled", **result)
     return result

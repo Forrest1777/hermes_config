@@ -835,8 +835,7 @@ def _checkpoint_after_sync(cp: dict[str, Any], result: dict[str, Any], gate_task
     }
 
 
-# HERMES_OPERATIONAL_SYNC_HANDLER_KWARGS_2026_09_09
-def _finalize_handler(args: dict[str, Any], **_: Any) -> str:
+def _finalize_handler(args: dict[str, Any]) -> str:
     root_id = str(os.environ.get("HERMES_KANBAN_TASK") or "").strip()
     workspace_raw = str(os.environ.get("HERMES_KANBAN_WORKSPACE") or "").strip()
     board = str(os.environ.get("HERMES_KANBAN_BOARD") or "").strip() or None
