@@ -1,0 +1,5 @@
+name: gwrm-preflight-guard
+version: "1.0.0"
+description: Pre-LLM dispatcher gate for cards that explicitly require GWRM.
+provides_hooks:
+  - on_kanban_dispatch_tick

@@ -210,6 +210,7 @@ platform_toolsets:
     - hermes-google_chat
 plugins:
   enabled:
+    - gwrm-preflight-guard
     - godot-lsp
     - governance-guard
     - gwrm-lifecycle-cleanup
@@ -262,3 +263,10 @@ known_builtin_toolsets:
 
 kanban_mode_guard:
   forbid_goal_mode: true
+
+
+gwrm_preflight_guard:
+  enabled: true
+  health_url: http://host.docker.internal:8130/health
+  timeout_seconds: 2.0
+  audit_interval_seconds: 60

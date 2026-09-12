@@ -566,3 +566,12 @@ Regras:
 - É proibido criar, converter ou executar qualquer card Kanban em goal mode (goal_mode=true / --goal).
 - Não existe exceção por autorização humana. Retry, recuperação, validação e tarefas abertas devem usar o ciclo Kanban normal com goal_mode=false.
 - Se um card legado ou externo aparecer com goal_mode=true, não execute mutações: bloqueie o card e reporte BLOCKED_OPERATIONAL para correção administrativa.
+
+<!-- TODO10_PRE_LLM_PREFLIGHT_POLICY -->
+## TODO10 — declaração pré-LLM de GWRM
+
+- Todo card de implementação deve declarar `gwrm_required: true` ou `gwrm_required: false` no Task Context Packet antes de ficar elegível para dispatch.
+- Use `gwrm_required: true` quando o trabalho planejado exigir runtime Godot/GWRM, incluindo LSP Godot, GUT, `run_project`, debug, edição/validação dependente de Godot ou outra operação que dependa do Runtime Governor.
+- Use `gwrm_required: false` quando o card for executável sem runtime GWRM.
+- Não delegue ao worker a decisão inicial sobre esse campo: o dispatcher precisa conhecê-lo antes de criar a sessão LLM.
+- Se `gwrm_required: true` e o GWRM estiver indisponível no preflight do dispatcher, o card deve permanecer elegível/ready sem consumir tentativa, run_id, processo worker ou sessão LLM.
