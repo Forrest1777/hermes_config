@@ -145,9 +145,6 @@ lsp:
         GWRM_API_KEY: 00fb45599c6ac65b6e70a3d7b67e37052ada4f341d333417f428e85aad6bdaa5
         GWRM_CONTAINER_WORKTREES_ROOT: /workspace/skill_system_framework/.worktrees
         GWRM_ENSURE_TIMEOUT: '190'
-        GODOT_LSP_CONTAINER_ROOT: /workspace
-        GODOT_LSP_HOST_ROOT: E:/dev/ai_agents/hermes/workspace
-        GODOT_LSP_CONNECT_TIMEOUT: '10'
 _config_version: 41
 worktree_guardian:
   holding_assignee: __worktree_guardian_hold__
@@ -177,7 +174,6 @@ platform_toolsets:
     - code_execution
     - cronjob
     - file
-    - godot_lsp
     - gwrm_gut_runner
     - worktree_guardian
     - image_gen
@@ -211,7 +207,6 @@ platform_toolsets:
     - hermes-google_chat
 plugins:
   enabled:
-    - godot-lsp
     - governance-guard
     - execution-governance
     - gwrm-lifecycle-cleanup
@@ -228,7 +223,6 @@ image_gen:
   model: gpt-image-2-high
 known_plugin_toolsets:
   cli:
-    - godot_lsp
     - spotify
     - worktree_guardian
     - gwrm_gut_runner

@@ -575,3 +575,13 @@ Regras:
 - Use `gwrm_required: false` quando o card for executável sem runtime GWRM.
 - Não delegue ao worker a decisão inicial sobre esse campo: o dispatcher precisa conhecê-lo antes de criar a sessão LLM.
 - Se `gwrm_required: true` e o GWRM estiver indisponível no preflight do dispatcher, o card deve permanecer elegível/ready sem consumir tentativa, run_id, processo worker ou sessão LLM.
+
+<!-- TODO12_GODOT_AI_FINAL_CUTOVER -->
+## TODO12 — Godot AI como caminho primário
+
+- Operações Godot devem usar o runtime/sessão associados à worktree e rotear por `session_id` explícito.
+- `session_activate` não deve ser usado como mecanismo normal de routing quando já existe `session_id`.
+- É proibido fallback silencioso para Godot MCP, Godot LSP, Computer Use ou outra sessão/runtime quando uma operação Godot AI falhar.
+- Falha de sessão deve produzir erro/reconciliation explícito; nunca trocar silenciosamente de sessão.
+- Mecanismos legados só podem ser usados quando permanecerem explicitamente habilitados como capacidade complementar e houver justificativa registrada.
+- O preflight TODO10 permanece obrigatório: cards com `gwrm_required: true` não podem criar worker/sessão LLM enquanto GWRM estiver indisponível.

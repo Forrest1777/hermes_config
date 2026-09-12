@@ -454,3 +454,13 @@ Seja direto, técnico e orientado a evidências. Não esconda falhas nem declare
 - É proibido criar, converter ou executar qualquer card Kanban em goal mode (goal_mode=true / --goal).
 - Não existe exceção por autorização humana. Retry, recuperação, validação e tarefas abertas devem usar o ciclo Kanban normal com goal_mode=false.
 - Se um card legado ou externo aparecer com goal_mode=true, não execute mutações: bloqueie o card e reporte BLOCKED_OPERATIONAL para correção administrativa.
+
+<!-- TODO12_GODOT_AI_FINAL_CUTOVER -->
+## TODO12 — Godot AI como caminho primário
+
+- Operações Godot devem usar o runtime/sessão associados à worktree e rotear por `session_id` explícito.
+- `session_activate` não deve ser usado como mecanismo normal de routing quando já existe `session_id`.
+- É proibido fallback silencioso para Godot MCP, Godot LSP, Computer Use ou outra sessão/runtime quando uma operação Godot AI falhar.
+- Falha de sessão deve produzir erro/reconciliation explícito; nunca trocar silenciosamente de sessão.
+- Mecanismos legados só podem ser usados quando permanecerem explicitamente habilitados como capacidade complementar e houver justificativa registrada.
+- O preflight TODO10 permanece obrigatório: cards com `gwrm_required: true` não podem criar worker/sessão LLM enquanto GWRM estiver indisponível.

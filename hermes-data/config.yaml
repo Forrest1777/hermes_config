@@ -159,9 +159,6 @@ lsp:
         GWRM_API_KEY: 00fb45599c6ac65b6e70a3d7b67e37052ada4f341d333417f428e85aad6bdaa5
         GWRM_CONTAINER_WORKTREES_ROOT: /workspace/skill_system_framework/.worktrees
         GWRM_ENSURE_TIMEOUT: '190'
-        GODOT_LSP_CONTAINER_ROOT: /workspace
-        GODOT_LSP_HOST_ROOT: E:/dev/ai_agents/hermes/workspace
-        GODOT_LSP_CONNECT_TIMEOUT: '10'
 _config_version: 41
 session_reset:
   mode: none
@@ -173,11 +170,9 @@ platform_toolsets:
     - browser
     - clarify
     - code_execution
-    - computer_use
     - cronjob
     - delegation
     - file
-    - godot_lsp
     - image_gen
     - memory
     - session_search
@@ -211,7 +206,6 @@ platform_toolsets:
 plugins:
   enabled:
     - gwrm-preflight-guard
-    - godot-lsp
     - governance-guard
     - gwrm-lifecycle-cleanup
     - operational-block-completion-guard
@@ -227,7 +221,6 @@ image_gen:
 known_plugin_toolsets:
   cli:
     - a2a
-    - godot_lsp
     - spotify
     - orchestration_control
     - worktree_guardian
