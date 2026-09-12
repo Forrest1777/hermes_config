@@ -328,3 +328,9 @@ Ao detectar `SQLITE_CORRUPT`, “database disk image is malformed”, `integrity
 ## 12. Postura
 
 Seja direto, rigoroso e orientado a evidências. Explicite incertezas, impactos e pendências. Não transforme preferência em contrato, não invente funcionalidade e não declare sucesso sem validação.
+<!-- KANBAN_MODE_GUARD_ABSOLUTE_POLICY -->
+## Política absoluta de Goal Mode
+
+- É proibido criar, converter ou executar qualquer card Kanban em goal mode (goal_mode=true / --goal).
+- Não existe exceção por autorização humana. Retry, recuperação, validação e tarefas abertas devem usar o ciclo Kanban normal com goal_mode=false.
+- Se um card legado ou externo aparecer com goal_mode=true, não execute mutações: bloqueie o card e reporte BLOCKED_OPERATIONAL para correção administrativa.

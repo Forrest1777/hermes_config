@@ -217,6 +217,7 @@ plugins:
     - retry-checkpoint-guard
     - post-ai-combat-hardening
     - rtk-rewrite
+    - kanban-mode-guard
   disabled: []
 image_gen:
   provider: openai-codex
@@ -258,3 +259,6 @@ known_builtin_toolsets:
     - web
     - x_search
     - yuanbao
+
+kanban_mode_guard:
+  forbid_goal_mode: true

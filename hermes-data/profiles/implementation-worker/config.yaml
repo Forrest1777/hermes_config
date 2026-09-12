@@ -220,6 +220,7 @@ plugins:
     - rtk-rewrite
     - worktree-guardian
     - post-ai-combat-hardening
+    - kanban-mode-guard
   disabled: []
 image_gen:
   provider: openai-codex
@@ -281,3 +282,6 @@ mcp_servers:
         - gui_scroll
       resources: false
       prompts: false
+
+kanban_mode_guard:
+  forbid_goal_mode: true

@@ -223,6 +223,7 @@ plugins:
   - gwrm-gut-runner
   - operational-sync
   - operational-cost-telemetry
+  - kanban-mode-guard
   disabled: []
 image_gen:
   provider: openai-codex
@@ -270,3 +271,6 @@ operational_cost_telemetry:
   gwrm_events_path: /opt/data/logs/gwrm-gut-runner/events.jsonl
   gwrm_cache_path: /opt/data/logs/gwrm-gut-runner/terminal-cache-v2.json
   auto_report_on_session_end: true
+
+kanban_mode_guard:
+  forbid_goal_mode: true

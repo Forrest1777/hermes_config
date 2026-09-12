@@ -39,6 +39,7 @@ plugins:
   enabled:
     - execution-governance
     - governance-guard
+    - kanban-mode-guard
   disabled: []
 known_plugin_toolsets:
   cli:
@@ -73,3 +74,6 @@ known_builtin_toolsets:
     - web
     - x_search
     - yuanbao
+
+kanban_mode_guard:
+  forbid_goal_mode: true

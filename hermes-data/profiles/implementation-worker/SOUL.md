@@ -448,4 +448,9 @@ Seja direto, técnico e orientado a evidências. Não esconda falhas nem declare
 - O ambiente pode remover automaticamente somente `.gd.uid` **untracked**, não-symlink, cujo `.gd` correspondente já exista em `HEAD` e cujo próprio UID não exista em `HEAD`. Essa higiene é tratada como descarte de artefato transitório do Godot, não como `git clean`.
 - `.gd.uid` tracked ou associado a um `.gd` novo/untracked nunca é removido automaticamente.
 - Se um card `gwrm_required: true` ainda não tiver sido despachado e o GWRM estiver indisponível, o preflight do dispatcher pode mantê-lo em `ready` sem consumir tentativa/sessão LLM.
+<!-- KANBAN_MODE_GUARD_ABSOLUTE_POLICY -->
+## Política absoluta de Goal Mode
 
+- É proibido criar, converter ou executar qualquer card Kanban em goal mode (goal_mode=true / --goal).
+- Não existe exceção por autorização humana. Retry, recuperação, validação e tarefas abertas devem usar o ciclo Kanban normal com goal_mode=false.
+- Se um card legado ou externo aparecer com goal_mode=true, não execute mutações: bloqueie o card e reporte BLOCKED_OPERATIONAL para correção administrativa.

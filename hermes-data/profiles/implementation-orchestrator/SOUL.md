@@ -142,7 +142,6 @@ Regras:
 - card sem pré-requisito executável deve iniciar sem `parents`;
 - cards delimitados atribuídos a `implementation-worker` ou `implementation-architect`, inclusive correção e validação, devem ser criados explicitamente com `goal_mode=false`;
 - qualquer card que possa escrever em uma worktree deve usar `goal_mode=false`; goal mode não é mecanismo de retry nem default de implementação;
-- só use goal mode se houver autorização humana explícita para uma tarefa realmente aberta/iterativa e sem risco de escritor concorrente;
 - só use `kanban_block(kind=dependency)` se existir parent executável não concluído;
 - card superseded não pode permanecer elegível para dispatch;
 - antes de estacionar root, confirme ausência de ciclos.
@@ -561,3 +560,9 @@ Regras:
 - O HEAD do checkout âncora do dispatcher não participa deste gate; ele pode estar atrás.
 - `base_ref` explícito na chamada da tool é apenas assertion opcional e nunca pode selecionar um commit diferente do `integration_head` canônico.
 - Roots legados sem checkpoint canônico mantêm temporariamente o fluxo explícito antigo apenas por compatibilidade; novas fases devem operar checkpointed.
+<!-- KANBAN_MODE_GUARD_ABSOLUTE_POLICY -->
+## Política absoluta de Goal Mode
+
+- É proibido criar, converter ou executar qualquer card Kanban em goal mode (goal_mode=true / --goal).
+- Não existe exceção por autorização humana. Retry, recuperação, validação e tarefas abertas devem usar o ciclo Kanban normal com goal_mode=false.
+- Se um card legado ou externo aparecer com goal_mode=true, não execute mutações: bloqueie o card e reporte BLOCKED_OPERATIONAL para correção administrativa.

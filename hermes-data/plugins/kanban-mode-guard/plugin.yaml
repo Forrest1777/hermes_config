@@ -1,0 +1,5 @@
+name: kanban-mode-guard
+version: "1.0.0"
+description: Enforce the environment-wide prohibition of Kanban goal-mode cards without modifying Hermes core.
+provides_hooks:
+  - on_kanban_dispatch_tick
