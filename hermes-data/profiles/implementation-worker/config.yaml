@@ -1,9 +1,8 @@
 model:
-  default: gpt-5.6-terra
-  #default: gpt-5.6-sol
-  #default: gpt-6-astra
-  provider: openai-codex
-  base_url: https://chatgpt.com/backend-api/codex
+  default: grok-4.5
+  #default: grok-4.6
+  provider: xai-oauth
+  base_url: https://api.x.ai/v1
 agent:
   max_turns: 220
   service_tier: normal
