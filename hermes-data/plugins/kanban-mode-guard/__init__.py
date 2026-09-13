@@ -200,6 +200,39 @@ def _guarded_dispatch_lane(conn, row, assignee, result, *args, **kwargs):
 
 
 _guarded_dispatch_lane._kanban_mode_guard = True
+_guarded_dispatch_lane._hermes_dispatch_guard = "kanban-mode-guard"
+
+
+_DISPATCH_ORIGINAL_ATTRS = (
+    "_kanban_mode_guard_original",
+    "_todo10_pre_llm_guard_original",
+)
+
+
+def _next_dispatch_wrapper(candidate):
+    for attr in _DISPATCH_ORIGINAL_ATTRS:
+        original = getattr(candidate, attr, None)
+        if callable(original) and original is not candidate:
+            return original
+    return None
+
+
+def _find_dispatch_wrapper(candidate, marker_attr: str):
+    current = candidate
+    seen: set[int] = set()
+
+    while callable(current):
+        ident = id(current)
+        if ident in seen:
+            raise RuntimeError("cyclic dispatcher wrapper chain")
+        seen.add(ident)
+
+        if getattr(current, marker_attr, False):
+            return current
+
+        current = _next_dispatch_wrapper(current)
+
+    return None
 
 
 def _ensure_patches() -> None:
@@ -211,27 +244,50 @@ def _ensure_patches() -> None:
     current_create = kb.create_task
     if not getattr(current_create, "_kanban_mode_guard", False):
         _ORIGINAL_CREATE = current_create
+        _guarded_create_task._kanban_mode_guard_original = current_create
         kb.create_task = _guarded_create_task
-    elif _ORIGINAL_CREATE is None:
-        _ORIGINAL_CREATE = getattr(
-            current_create, "_kanban_mode_guard_original", current_create
+    else:
+        original_create = getattr(
+            current_create,
+            "_kanban_mode_guard_original",
+            None,
         )
+        if not callable(original_create) or original_create is current_create:
+            raise RuntimeError(
+                "invalid kanban-mode create_task wrapper original"
+            )
+        _ORIGINAL_CREATE = original_create
 
     current_lane = dispatch._dispatch_lane_task
-    if not getattr(current_lane, "_kanban_mode_guard", False):
-        _ORIGINAL_DISPATCH_LANE = current_lane
-        dispatch._dispatch_lane_task = _guarded_dispatch_lane
-    elif _ORIGINAL_DISPATCH_LANE is None:
-        _ORIGINAL_DISPATCH_LANE = getattr(
-            current_lane, "_kanban_mode_guard_original", current_lane
-        )
+    existing = _find_dispatch_wrapper(
+        current_lane,
+        "_kanban_mode_guard",
+    )
 
-    _guarded_create_task._kanban_mode_guard_original = _ORIGINAL_CREATE
-    _guarded_dispatch_lane._kanban_mode_guard_original = _ORIGINAL_DISPATCH_LANE
+    if existing is not None:
+        original_lane = getattr(
+            existing,
+            "_kanban_mode_guard_original",
+            None,
+        )
+        if not callable(original_lane) or original_lane is existing:
+            raise RuntimeError(
+                "invalid kanban-mode dispatcher wrapper original"
+            )
+        # Needed when plugin discovery/reload re-executes this module while an
+        # older wrapper remains inside another guard's shared wrapper chain.
+        _ORIGINAL_DISPATCH_LANE = original_lane
+        return
+
+    _ORIGINAL_DISPATCH_LANE = current_lane
+    _guarded_dispatch_lane._kanban_mode_guard_original = current_lane
+    dispatch._dispatch_lane_task = _guarded_dispatch_lane
 
 
 def _health_hook(**kwargs):
-    _ensure_patches()
+    # DB triggers are persistent state and may be reconciled every tick.
+    # Python monkey-patches are intentionally NOT rebuilt here: doing so while
+    # gwrm-preflight-guard is also installed can create a cyclic wrapper chain.
     _ensure_db_guards(kwargs.get("board"))
     return True
 

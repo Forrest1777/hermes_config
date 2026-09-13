@@ -270,6 +270,39 @@ def _guarded_dispatch_lane(conn, row, assignee, result, *args, **kwargs):
 
 
 _guarded_dispatch_lane._todo10_pre_llm_guard = True
+_guarded_dispatch_lane._hermes_dispatch_guard = "gwrm-preflight-guard"
+
+
+_DISPATCH_ORIGINAL_ATTRS = (
+    "_todo10_pre_llm_guard_original",
+    "_kanban_mode_guard_original",
+)
+
+
+def _next_dispatch_wrapper(candidate):
+    for attr in _DISPATCH_ORIGINAL_ATTRS:
+        original = getattr(candidate, attr, None)
+        if callable(original) and original is not candidate:
+            return original
+    return None
+
+
+def _find_dispatch_wrapper(candidate, marker_attr: str):
+    current = candidate
+    seen: set[int] = set()
+
+    while callable(current):
+        ident = id(current)
+        if ident in seen:
+            raise RuntimeError("cyclic dispatcher wrapper chain")
+        seen.add(ident)
+
+        if getattr(current, marker_attr, False):
+            return current
+
+        current = _next_dispatch_wrapper(current)
+
+    return None
 
 
 def _ensure_patch() -> None:
@@ -278,22 +311,35 @@ def _ensure_patch() -> None:
     from hermes_cli import kanban_db_dispatch as dispatch
 
     current = dispatch._dispatch_lane_task
-    if not getattr(current, "_todo10_pre_llm_guard", False):
-        _ORIGINAL_DISPATCH_LANE = current
-        _guarded_dispatch_lane._todo10_pre_llm_guard_original = current
-        dispatch._dispatch_lane_task = _guarded_dispatch_lane
+    existing = _find_dispatch_wrapper(
+        current,
+        "_todo10_pre_llm_guard",
+    )
+
+    if existing is not None:
+        original = getattr(
+            existing,
+            "_todo10_pre_llm_guard_original",
+            None,
+        )
+        if not callable(original) or original is existing:
+            raise RuntimeError(
+                "invalid TODO10 dispatcher wrapper original"
+            )
+        # Needed when the module is re-executed/reloaded while an older
+        # wrapper function is still installed in the shared dispatcher chain.
+        _ORIGINAL_DISPATCH_LANE = original
         return
 
-    if _ORIGINAL_DISPATCH_LANE is None:
-        _ORIGINAL_DISPATCH_LANE = getattr(
-            current,
-            "_todo10_pre_llm_guard_original",
-            current,
-        )
+    _ORIGINAL_DISPATCH_LANE = current
+    _guarded_dispatch_lane._todo10_pre_llm_guard_original = current
+    dispatch._dispatch_lane_task = _guarded_dispatch_lane
 
 
 def _health_hook(**kwargs):
-    _ensure_patch()
+    # Do not mutate a shared monkey-patch chain on every dispatcher tick.
+    # register() installs/reconciles the wrapper once. Repeated per-tick
+    # rewrapping can form a cycle with kanban-mode-guard.
     return True
 
 
