@@ -138,25 +138,25 @@ Se `current_run_id` deixar de ser igual a `HERMES_KANBAN_RUN_ID`, ou houver evid
 - preserve o estado existente e reporte `OWNERSHIP_LOST / BLOCKED_OPERATIONAL`;
 - não continue apenas porque o status do card aparece como `running` ou `ready`.
 
-### GUT execution policy
+### GUT event-driven execution policy (HERMES_TODO3_EVENT_TEST_PLATFORM_2026_09_13)
 
-Use `gwrm_gut_run_and_wait` as the default tool to start or reuse supervised GUT execution through GWRM.
+GUT execution is event-driven. The normal tools are `gwrm_gut_run_event_driven` and `gwrm_gut_collect_event_result`.
 
-Never create manual waiting/polling loops using:
-`run_gut_tests` / `run_gut_test_script` → `get_gut_run_status` → `sleep`.
+Rules:
+- start/reuse GUT only with `gwrm_gut_run_event_driven`;
+- never use `get_gut_run_status`, `sleep`, `gwrm_gut_run_and_wait`, or `gwrm_gut_wait_existing` as a waiting loop;
+- when start returns `reason=PARKED_EVENT_WAIT`, the current Kanban run has already been intentionally ended/parked. Stop immediately: no additional tool calls, no commit, no `kanban_complete`, no manual unblock;
+- GWRM remains owner of the test process;
+- the authenticated terminal callback persists the result and unblocks the card;
+- after dispatcher resume, locate the latest `GWRM_GUT_TERMINAL_EVENT` comment and call `gwrm_gut_collect_event_result(operation_id)` exactly once;
+- `TESTS_PASSED` is a green gate;
+- `TESTS_FAILED` is a verified test failure and should be diagnosed without rerunning the same Git state;
+- `GUT_RESULT_UNVERIFIED` is an execution/result-production failure, not a proven assertion failure;
+- `EVENT_NOT_READY`, `PARK_FAILED`, or callback/bridge failure is `BLOCKED_OPERATIONAL`; do not replace it with polling;
+- direct GWRM GUT tools are diagnostic/recovery surfaces only, never the normal wait mechanism;
+- only the user performs push.
 
-When `gwrm_gut_run_and_wait` returns:
-- `reason=TESTS_PASSED`, `terminal=true`, `passed=true`: gate green.
-- `reason=TESTS_FAILED`, `terminal=true`, `passed=false`: verified test failure. Diagnose the returned evidence; do not treat it as infrastructure failure.
-- `reason=WAIT_WINDOW_EXPIRED`, `terminal=false`: the GUT operation is still alive. Continue exclusively with `gwrm_gut_wait_existing(operation_id)`. Never call `gwrm_gut_run_and_wait` again merely to keep waiting for that operation.
-- `reason=REPEATED_TERMINAL_RESULT`: the same selection already failed on the same Git state. Do not rerun until implementation or relevant diagnostic state changes.
-- `reason=GUT_RESULT_UNVERIFIED`: the process ended non-passing without trustworthy structured test evidence. Treat this as execution/result-production failure, not a proven test assertion failure. Inspect GWRM/GUT evidence before any rerun.
-- `reason=GWRM_UNAVAILABLE`: preserve WIP and return/block operationally. Do not start fallback polling loops or new GUT runs.
-- `reason=STATUS_UNAVAILABLE`: do not start another GUT. Preserve the operation_id and diagnose/recover the existing operation.
-
-`gwrm_gut_wait_existing(operation_id)` never starts a GUT run and is the only normal continuation surface after `WAIT_WINDOW_EXPIRED`.
-
-Do not rerun the same failing GUT without new evidence, implementation progress, or an explicit justified `force_rerun=true`.
+This policy supersedes earlier WAIT_WINDOW_EXPIRED/wait-existing guidance.
 
 ### Test impact policy (HERMES_OPERATIONAL_HARDENING_2026_09_03)
 

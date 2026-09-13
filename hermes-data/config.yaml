@@ -212,6 +212,7 @@ plugins:
     - post-ai-combat-hardening
     - rtk-rewrite
     - kanban-mode-guard
+    - provider-recovery
   disabled: []
 image_gen:
   provider: openai-codex
@@ -262,3 +263,14 @@ gwrm_preflight_guard:
   health_url: http://host.docker.internal:8130/health
   timeout_seconds: 2.0
   audit_interval_seconds: 60
+
+# HERMES_PROVIDER_RECOVERY_2026_09_13:BEGIN
+provider_recovery:
+  retry_interval_seconds: 1200
+  scan_limit: 300
+  evidence_limit: 40
+  allowed_profiles:
+    - implementation-orchestrator
+    - implementation-worker
+    - implementation-architect
+# HERMES_PROVIDER_RECOVERY_2026_09_13:END

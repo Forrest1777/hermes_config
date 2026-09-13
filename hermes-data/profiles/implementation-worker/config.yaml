@@ -173,7 +173,7 @@ platform_toolsets:
     - code_execution
     - cronjob
     - file
-    - gwrm_gut_runner
+    - gwrm_gut_event_runner
     - worktree_guardian
     - image_gen
     - memory
@@ -209,7 +209,7 @@ plugins:
     - governance-guard
     - execution-governance
     - gwrm-lifecycle-cleanup
-    - gwrm-gut-runner
+    - gwrm-gut-event-runner
     - operational-block-completion-guard
     - rtk-rewrite
     - worktree-guardian
@@ -224,8 +224,8 @@ known_plugin_toolsets:
   cli:
     - spotify
     - worktree_guardian
-    - gwrm_gut_runner
-gwrm_gut_runner:
+    - gwrm_gut_event_runner
+gwrm_gut_event_runner:
   poll_interval_seconds: 5
   max_wait_seconds: 720
   http_timeout_seconds: 10

@@ -1,0 +1,5 @@
+name: provider-recovery
+version: "1.0.0"
+description: Durable provider wait FSM with timed single-attempt retries for strong provider availability failures.
+provides_hooks:
+  - on_kanban_dispatch_tick

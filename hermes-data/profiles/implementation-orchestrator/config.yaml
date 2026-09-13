@@ -182,8 +182,9 @@ platform_toolsets:
   - web
   - orchestration_control
   - worktree_guardian
-  - gwrm_gut_runner
+  - gwrm_gut_event_runner
   - operational_sync
+
   - local_main_delivery
   - operational_cost_telemetry
   telegram:
@@ -215,8 +216,9 @@ plugins:
   - orchestration-control
   - rtk-rewrite
   - worktree-guardian
-  - gwrm-gut-runner
+  - gwrm-gut-event-runner
   - operational-sync
+
   - local-main-delivery
   - operational-cost-telemetry
   - kanban-mode-guard
@@ -230,8 +232,11 @@ known_plugin_toolsets:
   - spotify
   - orchestration_control
   - worktree_guardian
-  - gwrm_gut_runner
-gwrm_gut_runner:
+  - gwrm_gut_event_runner
+  - operational_sync
+  - local_main_delivery
+  - operational_cost_telemetry
+gwrm_gut_event_runner:
   poll_interval_seconds: 5
   max_wait_seconds: 720
   http_timeout_seconds: 10
@@ -263,8 +268,8 @@ operational_cost_telemetry:
   max_cards: 1000
   max_sessions: 5000
   top_n: 10
-  gwrm_events_path: /opt/data/logs/gwrm-gut-runner/events.jsonl
-  gwrm_cache_path: /opt/data/logs/gwrm-gut-runner/terminal-cache-v2.json
+  gwrm_events_path: /opt/data/logs/gwrm-gut-event-runner/events.jsonl
+  gwrm_cache_path: /opt/data/logs/gwrm-gut-event-runner/terminal-cache-v2.json
   auto_report_on_session_end: true
 
 kanban_mode_guard:

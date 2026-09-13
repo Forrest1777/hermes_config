@@ -604,3 +604,33 @@ Este bloco prevalece sobre qualquer regra historica conflitante deste profile.
 - `local_main_delivery_finalize` nao executa push. Push permanece exclusivamente do usuario.
 - O post-delivery sync deve manter root integration branch e `main` no mesmo head local final, incluindo o commit documental de entrega.
 <!-- HERMES_CANONICAL_LOCAL_DELIVERY_2026_09_13:END -->
+
+<!-- HERMES_RECOVERY_HARDENING_2026_09_13:BEGIN -->
+## Recovery hardening
+
+- Provider/rate-limit failures are operational availability failures, not semantic protocol failures for retry policy.
+- When provider recovery places a card in PROVIDER_WAIT, do not manually spam retries. The dispatcher authorizes one retry attempt after the configured interval; repeated provider failures return to PROVIDER_WAIT without a retry limit.
+- After human architecture approval, the orchestrator materializes ORCHESTRATOR_MATERIALIZATION with all canonical fields and reactivates the architect deterministically. Missing operational metadata must be filled by the orchestrator, not requested from the user again.
+- For stale Git index locks, use only worktree_guardian_recover_index_lock; never grant unrestricted m and never remove a lock that may belong to an active Git process.
+- Toolset validation must tolerate plugin toolsets before plugin discovery by maintaining known_plugin_toolsets; plugin discovery still remains the runtime authority.
+<!-- HERMES_RECOVERY_HARDENING_2026_09_13:END -->
+
+### GUT event-driven execution policy (HERMES_TODO3_EVENT_TEST_PLATFORM_2026_09_13)
+
+GUT execution is event-driven. The normal tools are `gwrm_gut_run_event_driven` and `gwrm_gut_collect_event_result`.
+
+Rules:
+- start/reuse GUT only with `gwrm_gut_run_event_driven`;
+- never use `get_gut_run_status`, `sleep`, `gwrm_gut_run_and_wait`, or `gwrm_gut_wait_existing` as a waiting loop;
+- when start returns `reason=PARKED_EVENT_WAIT`, the current Kanban run has already been intentionally ended/parked. Stop immediately: no additional tool calls, no commit, no `kanban_complete`, no manual unblock;
+- GWRM remains owner of the test process;
+- the authenticated terminal callback persists the result and unblocks the card;
+- after dispatcher resume, locate the latest `GWRM_GUT_TERMINAL_EVENT` comment and call `gwrm_gut_collect_event_result(operation_id)` exactly once;
+- `TESTS_PASSED` is a green gate;
+- `TESTS_FAILED` is a verified test failure and should be diagnosed without rerunning the same Git state;
+- `GUT_RESULT_UNVERIFIED` is an execution/result-production failure, not a proven assertion failure;
+- `EVENT_NOT_READY`, `PARK_FAILED`, or callback/bridge failure is `BLOCKED_OPERATIONAL`; do not replace it with polling;
+- direct GWRM GUT tools are diagnostic/recovery surfaces only, never the normal wait mechanism;
+- only the user performs push.
+
+This policy supersedes earlier WAIT_WINDOW_EXPIRED/wait-existing guidance.

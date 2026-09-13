@@ -1,0 +1,6 @@
+name: gwrm-gut-event-runner
+version: 0.2.0
+description: Event-driven GUT execution through GWRM with Kanban park/resume and zero test-status polling.
+provides_tools:
+  - gwrm_gut_run_event_driven
+  - gwrm_gut_collect_event_result
