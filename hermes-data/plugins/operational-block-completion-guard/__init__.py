@@ -277,3 +277,109 @@ def register(ctx):
         "on_kanban_dispatch_tick",
         _health_hook,
     )
+# HERMES_CANONICAL_LOCAL_DELIVERY_2026_09_13:BEGIN
+# Root completion gate: a root-like canonical checkpoint is terminal only after
+# verified local delivery to main. Non-root tasks remain unaffected.
+import yaml as _delivery_yaml
+
+
+def _delivery_checkpoint_state(conn, task_id):
+    rows = conn.execute(
+        "SELECT id, body FROM task_comments WHERE task_id = ? ORDER BY id DESC LIMIT 160",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        body = str(row["body"] or "").strip()
+        if "OPERATIONAL_CHECKPOINT_CANONICAL" not in body:
+            continue
+        lines = body.splitlines()
+        if lines and lines[0].startswith("OPERATIONAL_CHECKPOINT_CANONICAL"):
+            lines = lines[1:]
+        try:
+            parsed = _delivery_yaml.safe_load("\n".join(lines))
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        cp = parsed.get("operational_checkpoint") if isinstance(parsed.get("operational_checkpoint"), dict) else parsed
+        if not isinstance(cp, dict):
+            continue
+        root_branch = str(cp.get("root_integration_branch") or cp.get("integration_target_branch") or "").strip()
+        phase_id = str(cp.get("phase_id") or "").strip()
+        if not root_branch or not phase_id:
+            continue
+        delivery = cp.get("delivery_state") if isinstance(cp.get("delivery_state"), dict) else {}
+        target = str(cp.get("delivery_target_branch") or delivery.get("delivery_target_branch") or "").strip()
+        ready = (
+            target == "main"
+            and delivery.get("main_integrated") is True
+            and delivery.get("main_integration_pending") is False
+            and delivery.get("push_performed") in (False, None)
+        )
+        return {
+            "applicable": True,
+            "ready": ready,
+            "checkpoint_comment_id": int(row["id"]),
+            "phase_id": phase_id,
+            "root_integration_branch": root_branch,
+            "delivery_target_branch": target,
+            "delivery_state": delivery,
+        }
+    return {"applicable": False, "ready": False}
+
+
+_ORIGINAL_BLOCK_GUARDED_COMPLETE = _guarded_complete
+
+
+def _delivery_guarded_complete(conn, task_id, *args, **kwargs):
+    state = _delivery_checkpoint_state(conn, task_id)
+    if state.get("applicable") and not state.get("ready"):
+        from hermes_cli import kanban_db as kb
+        expected_run_id = kwargs.get("expected_run_id")
+        reason = (
+            "BLOCKED_OPERATIONAL: root completion refused because canonical local delivery "
+            "to main is not verified. Run operational_sync_finalize and then "
+            "local_main_delivery_finalize; push remains human-only."
+        )
+        blocked = kb.block_task(
+            conn,
+            task_id,
+            reason=reason,
+            kind="needs_input",
+            expected_run_id=expected_run_id,
+        )
+        if blocked:
+            try:
+                kb.add_comment(
+                    conn,
+                    task_id,
+                    author="operational-block-completion-guard",
+                    body=(
+                        "CANONICAL_LOCAL_DELIVERY_REQUIRED\n"
+                        f"checkpoint_comment_id: {state.get('checkpoint_comment_id')}\n"
+                        f"phase_id: {state.get('phase_id')}\n"
+                        f"root_integration_branch: {state.get('root_integration_branch')}\n"
+                        f"delivery_target_branch: {state.get('delivery_target_branch')}\n"
+                        "main_integrated: false_or_unverified\n"
+                        "push_performed: false\n"
+                    ),
+                )
+            except Exception:
+                pass
+        _audit({
+            "event": "canonical_local_delivery_completion_refused",
+            "task_id": task_id,
+            "state": state,
+        })
+        return False
+    return _ORIGINAL_BLOCK_GUARDED_COMPLETE(conn, task_id, *args, **kwargs)
+
+
+_delivery_guarded_complete._operational_block_guard = True
+_delivery_guarded_complete._operational_block_original = getattr(
+    _ORIGINAL_BLOCK_GUARDED_COMPLETE,
+    "_operational_block_original",
+    None,
+)
+_guarded_complete = _delivery_guarded_complete
+# HERMES_CANONICAL_LOCAL_DELIVERY_2026_09_13:END

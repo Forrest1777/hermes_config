@@ -184,6 +184,7 @@ platform_toolsets:
   - worktree_guardian
   - gwrm_gut_runner
   - operational_sync
+  - local_main_delivery
   - operational_cost_telemetry
   telegram:
   - hermes-telegram
@@ -216,6 +217,7 @@ plugins:
   - worktree-guardian
   - gwrm-gut-runner
   - operational-sync
+  - local-main-delivery
   - operational-cost-telemetry
   - kanban-mode-guard
   disabled: []
@@ -267,3 +269,8 @@ operational_cost_telemetry:
 
 kanban_mode_guard:
   forbid_goal_mode: true
+local_main_delivery:
+  repo_root: /workspace/skill_system_framework
+  delivery_target_branch: main
+  git_timeout_seconds: 90
+  update_operational_docs: true

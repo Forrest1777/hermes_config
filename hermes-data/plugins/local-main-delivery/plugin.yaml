@@ -1,0 +1,5 @@
+name: local-main-delivery
+version: 1.0.0
+description: Fail-closed orchestrator-only ff-local delivery from the validated root integration branch to local main, with post-delivery state sync and no push.
+provides_tools:
+  - local_main_delivery_finalize

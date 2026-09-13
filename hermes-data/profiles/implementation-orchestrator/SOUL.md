@@ -55,8 +55,9 @@ Não reconstrua estado pelo histórico de conversa.
 Mantenha:
 ```yaml
 phase_id: <fase>
-status: AUTHORIZED | PLANNING | RUNNING | BLOCKED_BY_DESIGN | CONSOLIDATED_VALIDATION | COMPLETED
-integration_target_branch: <branch>
+status: AUTHORIZED | PLANNING | RUNNING | BLOCKED_BY_DESIGN | CONSOLIDATED_VALIDATION | DELIVERING_LOCAL | COMPLETED
+root_integration_branch: wt/<root_task_id>
+delivery_target_branch: main
 phase_base_commit: <hash>
 required_child_cards: []
 optional_child_cards: []
@@ -82,7 +83,7 @@ operational_checkpoint:
 
 Atualize o checkpoint após integração, criação/substituição relevante de cards, nova decisão arquitetural e antes de estacionar o root. Mantenha um checkpoint canônico, sem acumular snapshots redundantes.
 
-`COMPLETED` exige todos os gates verdadeiros, exceto `push_performed`, que permanece `false`.
+`COMPLETED` exige todos os gates verdadeiros, entrega local verificada em `delivery_target_branch: main`, `main_integration_pending=false`, `main_integrated=true` e `push_performed=false`. Push continua exclusivamente humano.
 
 ## 4. Autonomia
 
@@ -114,7 +115,8 @@ card_id: <id>
 phase_id: <fase>
 logical_parent_card_id: <card raiz>
 parent_card_id: <legado/compatibilidade quando ainda usado pelo tooling>
-integration_target_branch: <branch>
+root_integration_branch: wt/<root_task_id>
+delivery_target_branch: main
 created_from_commit: <preenchido/reconciliado pelo Guardian>
 base_ref: <preenchido/reconciliado pelo Guardian>
 dependencies: []
@@ -436,7 +438,8 @@ Relatório final:
 ```yaml
 phase_id: <fase>
 status: COMPLETED | BLOCKED_BY_DESIGN | PARTIAL
-integration_target_branch: <branch>
+root_integration_branch: wt/<root_task_id>
+delivery_target_branch: main
 phase_base_commit: <hash>
 cards: []
 integration:
@@ -585,3 +588,19 @@ Regras:
 - Falha de sessão deve produzir erro/reconciliation explícito; nunca trocar silenciosamente de sessão.
 - Mecanismos legados só podem ser usados quando permanecerem explicitamente habilitados como capacidade complementar e houver justificativa registrada.
 - O preflight TODO10 permanece obrigatório: cards com `gwrm_required: true` não podem criar worker/sessão LLM enquanto GWRM estiver indisponível.
+
+<!-- HERMES_CANONICAL_LOCAL_DELIVERY_2026_09_13:BEGIN -->
+## Canonical local delivery - TODO 1 / POLISH_DEBUG
+
+Este bloco prevalece sobre qualquer regra historica conflitante deste profile.
+
+- `FASE 15` e a fase terminal do roadmap executado. Trabalho posterior e `POLISH_DEBUG`, nao `FASE 16`.
+- Root usa dois conceitos distintos: `root_integration_branch: wt/<root_task_id>` e `delivery_target_branch: main`.
+- O gate consolidado valida primeiro o head integrado na branch do root.
+- `operational_sync_finalize` continua sendo executado uma unica vez apos o gate, produzindo o docs head/Graphify no root.
+- Em seguida, `local_main_delivery_finalize` deve entregar por fast-forward o docs head validado para a worktree local de `main`, verificar limpeza/ancestralidade, registrar estado pos-delivery e publicar checkpoint canonico de entrega.
+- Se `main` divergiu, se a worktree de `main` estiver dirty, ou se fast-forward nao for possivel, o fluxo deve falhar fechado. Reconciliar e revalidar impacto antes de nova tentativa.
+- Root nao pode chamar `kanban_complete` enquanto o checkpoint canonico mais recente nao registrar `delivery_target_branch: main`, `main_integration_pending: false`, `main_integrated: true` e `push_performed: false`.
+- `local_main_delivery_finalize` nao executa push. Push permanece exclusivamente do usuario.
+- O post-delivery sync deve manter root integration branch e `main` no mesmo head local final, incluindo o commit documental de entrega.
+<!-- HERMES_CANONICAL_LOCAL_DELIVERY_2026_09_13:END -->
