@@ -300,11 +300,32 @@ def _reconcile_waits_once() -> dict[str, int]:
                 status == 409
                 and response.get("reason") == "TASK_NOT_PARKED_YET"
             ):
-                # _resume_wait stores terminal_events before checking the
-                # Kanban state. The runner's race-safe path will consume it.
+                # HERMES_GUT_TERMINAL_BEFORE_PARK_SETTLE_2026_09_14
+                # _resume_wait has already persisted terminal_events. Mark the
+                # wait terminal_before_park so it leaves the reconciliation
+                # queue. If this is a genuine start/park race, the runner's
+                # race-safe _get_terminal_event path will consume the event and
+                # preserve the same state. For historical/stale waits this also
+                # prevents indefinite GWRM polling/log spam.
+                settle = _db()
+                try:
+                    with settle:
+                        settle.execute(
+                            """
+                            UPDATE waits
+                            SET state='terminal_before_park',
+                                updated_at=?
+                            WHERE operation_id=?
+                              AND state IN ('registered', 'parked')
+                            """,
+                            (int(time.time()), operation_id),
+                        )
+                finally:
+                    settle.close()
+
                 print(
                     "gwrm-gut-event-bridge reconcile terminal-before-park "
-                    f"operation_id={operation_id}",
+                    f"operation_id={operation_id} settled=true",
                     flush=True,
                 )
             else:

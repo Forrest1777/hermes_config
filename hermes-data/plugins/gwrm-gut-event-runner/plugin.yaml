@@ -1,5 +1,5 @@
 name: gwrm-gut-event-runner
-version: 0.2.1
+version: 0.2.2
 description: Event-driven GUT execution through GWRM with Kanban park/resume and background recovery for lost terminal callbacks.
 provides_tools:
   - gwrm_gut_run_event_driven
