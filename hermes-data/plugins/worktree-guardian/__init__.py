@@ -14,6 +14,7 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -645,6 +646,152 @@ def _branch_tip(repo_root: Path, branch: str, timeout: int) -> Optional[str]:
     return p.stdout.strip() if p.returncode == 0 else None
 
 
+# HERMES_GWRM_OPERATIONAL_RESUME_WORKTREE_2026_09_14
+_GWRM_EVENT_STATE_DB = Path(
+    "/opt/data/logs/gwrm-gut-event-runner/state-v1.sqlite3"
+)
+
+
+def _gwrm_event_git_fingerprint(workspace: Path) -> str | None:
+    try:
+        def raw(*args: str) -> bytes:
+            proc = _run_git(
+                workspace,
+                list(args),
+                30,
+                text=False,
+            )
+            if proc.returncode != 0:
+                return b"__GIT_ERROR__"
+            return proc.stdout or b""
+
+        head = raw("rev-parse", "HEAD")
+        diff = raw("diff", "--binary", "HEAD", "--")
+        untracked = raw(
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        )
+        if (
+            head == b"__GIT_ERROR__"
+            or diff == b"__GIT_ERROR__"
+            or untracked == b"__GIT_ERROR__"
+        ):
+            return None
+
+        digest = hashlib.sha256()
+        digest.update(head)
+        digest.update(diff)
+        digest.update(untracked)
+
+        for raw_name in (
+            item for item in untracked.split(b"\0") if item
+        ):
+            rel = raw_name.decode(
+                "utf-8",
+                errors="surrogateescape",
+            )
+            target = workspace / rel
+            if target.is_file():
+                digest.update(raw_name)
+                digest.update(target.read_bytes())
+
+        return digest.hexdigest()
+    except Exception:
+        return None
+
+
+def _authorized_gwrm_operational_resume(
+    workspace: Path,
+) -> dict[str, Any] | None:
+    task_id = str(
+        os.environ.get("HERMES_KANBAN_TASK") or ""
+    ).strip()
+    run_id = str(
+        os.environ.get("HERMES_KANBAN_RUN_ID") or ""
+    ).strip()
+
+    if not task_id or not run_id:
+        return None
+    if not _GWRM_EVENT_STATE_DB.exists():
+        return None
+
+    try:
+        state = json.loads(
+            _governor_state_path().read_text(
+                encoding="utf-8"
+            )
+        )
+        task = (
+            (state.get("tasks") or {}).get(task_id)
+            or {}
+        )
+        run = (
+            (task.get("runs") or {}).get(run_id)
+            or {}
+        )
+        operation_id = str(
+            run.get("gwrm_event_resume_operation_id")
+            or ""
+        ).strip()
+        if not operation_id.startswith("gut_"):
+            return None
+
+        conn = sqlite3.connect(
+            str(_GWRM_EVENT_STATE_DB),
+            timeout=5,
+        )
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT w.operation_id,w.task_id,w.run_id,w.state,"
+            "w.git_fingerprint,e.payload_json "
+            "FROM waits w JOIN terminal_events e "
+            "ON e.operation_id=w.operation_id "
+            "WHERE w.operation_id=? AND w.task_id=? LIMIT 1",
+            (operation_id, task_id),
+        ).fetchone()
+        conn.close()
+
+        if row is None:
+            return None
+
+        wait_state = str(row["state"] or "")
+        if wait_state not in {
+            "resume_dispatched",
+            "collected",
+        }:
+            return None
+
+        payload = json.loads(str(row["payload_json"]))
+        if (
+            not isinstance(payload, dict)
+            or payload.get("terminal") is not True
+        ):
+            return None
+
+        expected = str(
+            row["git_fingerprint"] or ""
+        ).strip()
+        actual = _gwrm_event_git_fingerprint(
+            workspace
+        )
+        if not expected or not actual:
+            return None
+        if expected != actual:
+            return None
+
+        return {
+            "operation_id": operation_id,
+            "source_run_id": int(row["run_id"]),
+            "current_run_id": run_id,
+            "wait_state": wait_state,
+            "git_fingerprint": actual,
+        }
+    except Exception:
+        return None
+
+
 # HERMES_OPERATIONAL_HARDENING_2026_09_03: read-only validation of a governance-authorized dirty retry.
 def _governor_state_path() -> Path:
     try:
@@ -751,6 +898,8 @@ def _validate_worktree(
                 "initial_git_clean": not bool(status.stdout.strip()),
                 "git_status_sha256": hashlib.sha256((status.stdout or "").encode("utf-8")).hexdigest(),
                 "authorized_retry_checkpoint": False,
+                "authorized_operational_resume": False,
+                "operational_resume_operation_id": None,
                 "resume_epoch": None,
             }
         )
@@ -774,7 +923,25 @@ def _validate_worktree(
                 result["resume_epoch"] = authorization.get("resume_epoch")
                 result["retry_checkpoint_reason"] = authorization.get("reason")
             else:
-                result["errors"].append("worktree is not clean")
+                operational_resume = _authorized_gwrm_operational_resume(
+                    real
+                )
+                if operational_resume is not None:
+                    result["authorized_operational_resume"] = True
+                    result["operational_resume_operation_id"] = (
+                        operational_resume["operation_id"]
+                    )
+                    result["operational_resume_source_run_id"] = (
+                        operational_resume["source_run_id"]
+                    )
+                    result["operational_resume_current_run_id"] = (
+                        operational_resume["current_run_id"]
+                    )
+                    result["operational_resume_wait_state"] = (
+                        operational_resume["wait_state"]
+                    )
+                else:
+                    result["errors"].append("worktree is not clean")
 
         if repo_root is not None:
             repo_common = _repo_common(repo_root, timeout)
@@ -825,7 +992,10 @@ def _validate_worktree(
                     break
         result["missing_tracked_files"] = missing
         if missing:
-            if result.get("authorized_retry_checkpoint"):
+            if (
+                result.get("authorized_retry_checkpoint")
+                or result.get("authorized_operational_resume")
+            ):
                 # HERMES_AUTHORIZED_DIRTY_RETRY_DELETIONS_2026_09_08
                 # The Governor authorization is bound to workspace + HEAD +
                 # exact git-status SHA256. Therefore tracked files already

@@ -115,9 +115,9 @@ Regras:
 - use sempre a mesma `worktree_name`;
 - não conecte manualmente a LSP/relay/DAP nem inicie Godot fora do GWRM;
 - `.gd` => diagnósticos LSP quando aplicáveis;
-- GUT somente via `run_gut_tests`/`run_gut_test_script`, com `worktree_name` e `res://`;
+- GUT normal somente via `gwrm_gut_run_event_driven`; `run_gut_tests`, `run_gut_test_script` e `get_gut_run_status` sÃ£o superfÃ­cies de diagnÃ³stico/recovery, nunca o mecanismo normal de espera;
 - após start, consulte `get_gut_run_status(operation_id)` somente até `terminal:true`;
-- `completed` => avalie `result.passed`, contagens, stdout/stderr; `failed` => falha operacional;
+- em resultado terminal, avalie `reason`, `passed`, contagens e `result_source`; `GUT_RESULT_UNVERIFIED` Ã© falha de produÃ§Ã£o de evidÃªncia;
 - não inicie execução idêntica enquanto houver `queued/running`;
 - timeout de toolcall não implica nova ativação: descubra o estado existente;
 - interprete `passed`/contagens, não só `exit_code`;
@@ -140,6 +140,21 @@ Se `current_run_id` deixar de ser igual a `HERMES_KANBAN_RUN_ID`, ou houver evid
 
 ### GUT event-driven execution policy (HERMES_TODO3_EVENT_TEST_PLATFORM_2026_09_13)
 
+<!-- HERMES_GWRM_OPERATIONAL_RESUME_WORKER_CONTRACT_2026_09_14 -->
+#### Operational resume â€” contrato canÃ´nico
+
+Este bloco prevalece sobre qualquer orientaÃ§Ã£o anterior conflitante neste SOUL.
+
+- `GWRM_EVENT_WAIT` + terminal event + redispatch Ã© continuaÃ§Ã£o operacional da mesma execuÃ§Ã£o lÃ³gica, nÃ£o retry funcional.
+- Worktree dirty Ã© permitida nessa retomada somente se `worktree_guardian_verify` retornar `authorized_operational_resume=true`.
+- O `operational_resume_operation_id` retornado pelo Guardian deve ser o Ãºnico `operation_id` coletado nessa run.
+- Nunca selecione resultado pela ideia de â€œÃºltimo comentÃ¡rioâ€ ou por terminal antigo do mesmo card.
+- `gwrm_gut_collect_event_result` deve rejeitar operaÃ§Ã£o nÃ£o vinculada Ã  run atual.
+- Cache sÃ³ pode reutilizar resultado GUT verificado (`TESTS_PASSED` ou `TESTS_FAILED`); `GUT_RESULT_UNVERIFIED` nunca Ã© cacheÃ¡vel.
+- ApÃ³s `PARKED_EVENT_WAIT`, encerre imediatamente a run sem polling, commit ou `kanban_complete`.
+- ApÃ³s coleta vÃ¡lida, continue do WIP preservado, finalize validaÃ§Ã£o, commit atÃ´mico e handoff normal.
+
+
 GUT execution is event-driven. The normal tools are `gwrm_gut_run_event_driven` and `gwrm_gut_collect_event_result`.
 
 Rules:
@@ -148,7 +163,7 @@ Rules:
 - when start returns `reason=PARKED_EVENT_WAIT`, the current Kanban run has already been intentionally ended/parked. Stop immediately: no additional tool calls, no commit, no `kanban_complete`, no manual unblock;
 - GWRM remains owner of the test process;
 - the authenticated terminal callback persists the result and unblocks the card;
-- after dispatcher resume, locate the latest `GWRM_GUT_TERMINAL_EVENT` comment and call `gwrm_gut_collect_event_result(operation_id)` exactly once;
+- after dispatcher resume, `worktree_guardian_verify` must return `authorized_operational_resume=true` and the exact `operational_resume_operation_id`; collect exactly that operation. Never infer it from the latest comment or from an older terminal event;
 - `TESTS_PASSED` is a green gate;
 - `TESTS_FAILED` is a verified test failure and should be diagnosed without rerunning the same Git state;
 - `GUT_RESULT_UNVERIFIED` is an execution/result-production failure, not a proven assertion failure;

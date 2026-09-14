@@ -324,6 +324,81 @@ def _compact_terminal(payload: dict[str, Any], include_failure_output: bool = Tr
     return compact
 
 
+# HERMES_GWRM_RESULT_CURRENT_RUN_BINDING_2026_09_14
+def _governor_state_path() -> Path:
+    try:
+        from hermes_constants import get_hermes_home
+        home = Path(
+            get_hermes_home()
+        ).resolve(strict=False)
+    except Exception:
+        home = Path(
+            os.environ.get("HERMES_HOME", "/opt/data")
+        ).resolve(strict=False)
+
+    if home.name == "execution-governor":
+        governor = home
+    elif home.parent.name == "profiles":
+        governor = home.parent / "execution-governor"
+    else:
+        governor = (
+            home / "profiles" / "execution-governor"
+        )
+
+    return governor / "governance" / "state.json"
+
+
+def _expected_resume_operation_for_current_run() -> str | None:
+    task_id = str(
+        os.environ.get("HERMES_KANBAN_TASK") or ""
+    ).strip()
+    run_id = str(
+        os.environ.get("HERMES_KANBAN_RUN_ID") or ""
+    ).strip()
+    if not task_id or not run_id:
+        return None
+
+    try:
+        state = json.loads(
+            _governor_state_path().read_text(
+                encoding="utf-8"
+            )
+        )
+        task = (
+            (state.get("tasks") or {}).get(task_id)
+            or {}
+        )
+        run = (
+            (task.get("runs") or {}).get(run_id)
+            or {}
+        )
+        operation_id = str(
+            run.get("gwrm_event_resume_operation_id")
+            or ""
+        ).strip()
+        return (
+            operation_id
+            if operation_id.startswith("gut_")
+            else None
+        )
+    except Exception:
+        return None
+
+
+def _terminal_cacheable(
+    payload: dict[str, Any],
+) -> bool:
+    compact = _compact_terminal(
+        payload,
+        include_failure_output=False,
+    )
+    return compact.get("reason") in {
+        "TESTS_PASSED",
+        "TESTS_FAILED",
+    }
+
+
+
 def _get_terminal_event(operation_id: str) -> dict[str, Any] | None:
     conn = _db()
     try:
@@ -367,7 +442,10 @@ def _find_cached_terminal(
             if not event:
                 continue
             payload = json.loads(event["payload_json"])
-            if isinstance(payload, dict):
+            if (
+                isinstance(payload, dict)
+                and _terminal_cacheable(payload)
+            ):
                 return str(row["operation_id"]), payload
         return None
     finally:
@@ -569,6 +647,33 @@ def _collect_handler(args: dict[str, Any], **kwargs) -> str:
     operation_id = str(args.get("operation_id") or "").strip()
     if not operation_id.startswith("gut_"):
         return _err("invalid operation_id")
+
+    expected_operation_id = (
+        _expected_resume_operation_for_current_run()
+    )
+    if expected_operation_id is None:
+        _audit({
+            "event": "collect_refused_unbound_run",
+            "operation_id": operation_id,
+        })
+        return _err(
+            "no GWRM operational resume is bound to the current Kanban run",
+            reason="OPERATION_NOT_BOUND_TO_CURRENT_RUN",
+            operation_id=operation_id,
+        )
+
+    if operation_id != expected_operation_id:
+        _audit({
+            "event": "collect_refused_stale_operation",
+            "operation_id": operation_id,
+            "expected_operation_id": expected_operation_id,
+        })
+        return _err(
+            "operation_id does not belong to the current operational-resume run",
+            reason="STALE_OPERATION_FOR_CURRENT_RUN",
+            operation_id=operation_id,
+            expected_operation_id=expected_operation_id,
+        )
 
     event = _get_terminal_event(operation_id)
     if event is None:

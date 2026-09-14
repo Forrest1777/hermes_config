@@ -2092,6 +2092,33 @@ def _dirty_recovery_guard_comment_present(kb, conn, task_id: str) -> bool:
     return False
 
 
+# HERMES_SUPERSEDED_OPERATIONAL_RESUME_CATCHUP_SKIP_2026_09_14
+def _dirty_recovery_case_is_superseded_operational_resume(
+    state: dict[str, Any],
+    task_id: str,
+) -> bool:
+    task = (
+        (state.get("tasks") or {}).get(task_id)
+        or {}
+    )
+    case_id = str(
+        task.get("last_dirty_recovery_request_case_id")
+        or ""
+    ).strip()
+    if not case_id:
+        return False
+
+    case_meta = (
+        (state.get("cases") or {}).get(case_id)
+        or {}
+    )
+    return (
+        str(case_meta.get("status") or "")
+        == "SUPERSEDED_OPERATIONAL_RESUME_FALSE_POSITIVE"
+    )
+
+
+
 def _dirty_recovery_catchup_scan(board: str | None) -> dict[str, Any]:
     """Bounded restart/catch-up scan for already-durable retry guard blocks."""
     global _DIRTY_RECOVERY_LAST_CATCHUP_MONOTONIC
@@ -2109,6 +2136,21 @@ def _dirty_recovery_catchup_scan(board: str | None) -> dict[str, Any]:
     max_tasks = max(1, min(1000, int(cfg.get("catchup_max_tasks") or 200)))
     candidates: list[str] = []
     try:
+        with _file_lock(_state_path()):
+            catchup_state = _read_state_unlocked()
+    except Exception as exc:
+        _append_event(
+            "dirty_checkpoint_recovery_catchup_failed",
+            board=effective_board,
+            fail_closed=True,
+            error=f"state_snapshot:{type(exc).__name__}:{exc}"[:1000],
+        )
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+
+    try:
         from hermes_cli import kanban_db as kb
         conn = _kanban_connect(board=effective_board)
         try:
@@ -2122,6 +2164,14 @@ def _dirty_recovery_catchup_scan(board: str | None) -> dict[str, Any]:
                 if getattr(task, "current_run_id", None) is not None:
                     continue
                 tid = str(getattr(task, "id", "") or "")
+                if (
+                    tid
+                    and _dirty_recovery_case_is_superseded_operational_resume(
+                        catchup_state,
+                        tid,
+                    )
+                ):
+                    continue
                 if tid and _dirty_recovery_guard_comment_present(kb, conn, tid):
                     candidates.append(tid)
         finally:

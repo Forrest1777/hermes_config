@@ -221,6 +221,7 @@ image_gen:
   model: gpt-image-2-high
 known_plugin_toolsets:
   cli:
+    - gwrm_gut_event_runner
     - a2a
     - spotify
     - orchestration_control
