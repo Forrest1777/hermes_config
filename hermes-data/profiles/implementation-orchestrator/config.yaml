@@ -256,7 +256,7 @@ operational_cost_telemetry:
   max_sessions: 5000
   top_n: 10
   gwrm_events_path: /opt/data/logs/gwrm-gut-event-runner/events.jsonl
-  gwrm_cache_path: /opt/data/logs/gwrm-gut-event-runner/terminal-cache-v2.json
+  gwrm_cache_path: /opt/data/logs/gwrm-gut-event-runner/state-v1.sqlite3
   auto_report_on_session_end: true
 
 kanban_mode_guard:
