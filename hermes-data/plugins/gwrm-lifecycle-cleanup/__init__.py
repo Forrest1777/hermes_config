@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import threading
 import time
 from urllib.error import HTTPError
@@ -30,8 +31,12 @@ def _gwrm_connection():
         env.get("GWRM_CONTROL_URL") or ""
     ).strip().rstrip("/")
 
+    # HERMES_GWRM_LIFECYCLE_ENV_CANONICAL_2026_09_14
+    # The raw YAML is validated separately by hermes-config-preflight.py.
+    # Runtime authentication uses the container process environment so every
+    # GWRM integration shares one effective credential source.
     api_key = str(
-        env.get("GWRM_API_KEY") or ""
+        os.environ.get("GWRM_API_KEY") or ""
     ).strip()
 
     if not control_url:

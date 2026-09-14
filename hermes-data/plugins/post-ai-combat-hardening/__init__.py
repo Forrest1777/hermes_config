@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 LOG = logging.getLogger("hermes.plugins.post_ai_combat_hardening")
@@ -30,7 +31,15 @@ AUDIT = Path("/opt/data/logs/post-ai-combat-hardening/events.jsonl")
 _ALLOWED_PROFILES = {"implementation-worker", "implementation-architect"}
 _OPENER = build_opener(ProxyHandler({}))
 _ORIGINAL_GUARD = None
-_LAST_UNAVAILABLE_LOG: dict[str, float] = {}
+_LAST_UNAVAILABLE_LOG: dict[tuple[str, str], float] = {}
+_GWRM_ENV_REF_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+_GWRM_AUDIT_INTERVAL_SECONDS = float(
+    os.environ.get(
+        "HERMES_GWRM_PREFLIGHT_AUDIT_INTERVAL_SECONDS",
+        "300",
+    )
+)
+# HERMES_GWRM_DIAGNOSTIC_HARDENING_2026_09_14
 
 
 def _audit(event: str, **payload: Any) -> None:
@@ -115,20 +124,87 @@ def _task_requires_gwrm(body: str) -> bool:
     return bool(re.search(r"(?mi)^\s*gwrm_required\s*:\s*true\s*(?:#.*)?$", body or ""))
 
 
+def _resolve_gwrm_env_value(value: Any) -> tuple[str, str | None]:
+    raw = str(value or "").strip()
+    match = _GWRM_ENV_REF_RE.fullmatch(raw)
+    if not match:
+        return raw, None
+
+    env_name = match.group(1)
+    return str(os.environ.get(env_name) or "").strip(), env_name
+
+
+def _connection_from_config(cfg: dict[str, Any]) -> tuple[str, str]:
+    """Resolve GWRM connection using process env as the canonical secret source.
+
+    The YAML carries only ${GWRM_API_KEY}; the actual secret must come from
+    the Hermes container environment.  This avoids divergence between config
+    loader interpolation and the service environment used by the control plane.
+    """
+    # HERMES_GWRM_AUTH_ENV_CANONICAL_2026_09_14
+    lsp = cfg.get("lsp") or {}
+    servers = lsp.get("servers") or {}
+    godot = servers.get("godot-gdscript") or {}
+    env = godot.get("env") or {}
+
+    raw_url = str(env.get("GWRM_CONTROL_URL") or "").strip()
+    raw_key = str(env.get("GWRM_API_KEY") or "").strip()
+
+    if not raw_url:
+        raise RuntimeError(
+            "gwrm_control_url_missing: "
+            "godot-gdscript.env.GWRM_CONTROL_URL"
+        )
+
+    if not raw_key:
+        raise RuntimeError(
+            "gwrm_api_key_config_missing: "
+            "godot-gdscript.env.GWRM_API_KEY"
+        )
+
+    url, url_env = _resolve_gwrm_env_value(raw_url)
+
+    if url_env and not url:
+        raise RuntimeError(
+            f"gwrm_control_url_env_missing: {url_env}"
+        )
+
+    if not url:
+        raise RuntimeError("gwrm_control_url_empty")
+
+    # load_config_readonly() may already resolve ${GWRM_API_KEY} before this
+    # plugin sees the config.  Canonical-placeholder enforcement belongs to
+    # hermes-config-preflight.py, which validates the raw YAML on disk.
+    #
+    # Runtime authentication always uses the process environment as the
+    # canonical secret source, regardless of whether raw_key is still the
+    # placeholder or already the resolved value.
+    key = str(os.environ.get("GWRM_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError(
+            "gwrm_api_key_env_missing: GWRM_API_KEY"
+        )
+
+    return url.rstrip("/"), key
+
+
 def _gwrm_connection() -> tuple[str, str]:
-    test_url = str(os.environ.get("HERMES_GWRM_PREFLIGHT_TEST_URL") or "").strip()
-    test_key = str(os.environ.get("HERMES_GWRM_PREFLIGHT_TEST_KEY") or "").strip()
+    test_url = str(
+        os.environ.get("HERMES_GWRM_PREFLIGHT_TEST_URL")
+        or ""
+    ).strip()
+    test_key = str(
+        os.environ.get("HERMES_GWRM_PREFLIGHT_TEST_KEY")
+        or ""
+    ).strip()
+
     if test_url:
         return test_url.rstrip("/"), test_key or "smoke-test"
 
     from hermes_cli.config import load_config_readonly
+
     cfg = load_config_readonly() or {}
-    env = (((cfg.get("lsp") or {}).get("servers") or {}).get("godot-gdscript") or {}).get("env") or {}
-    url = str(env.get("GWRM_CONTROL_URL") or "").strip().rstrip("/")
-    key = str(env.get("GWRM_API_KEY") or "").strip()
-    if not url or not key:
-        raise RuntimeError("GWRM control URL/API key missing from godot-gdscript env")
-    return url, key
+    return _connection_from_config(cfg)
 
 
 def _gwrm_health(timeout: float = 2.0) -> tuple[bool, str]:
@@ -137,17 +213,46 @@ def _gwrm_health(timeout: float = 2.0) -> tuple[bool, str]:
         request = Request(
             f"{url}/api/v1/worktrees",
             method="GET",
-            headers={"X-API-Key": key, "Accept": "application/json"},
+            headers={
+                "X-API-Key": key,
+                "Accept": "application/json",
+            },
         )
-        with _OPENER.open(request, timeout=timeout) as response:
-            if int(getattr(response, "status", 200)) >= 400:
-                return False, f"http_{response.status}"
+
+        with _OPENER.open(
+            request,
+            timeout=timeout,
+        ) as response:
+            status = int(
+                getattr(response, "status", 200)
+            )
+
+            if status >= 400:
+                return False, f"http_{status}"
+
             raw = response.read()
+
         if raw:
             json.loads(raw.decode("utf-8"))
+
         return True, "ok"
+
+    except HTTPError as exc:
+        if exc.code == 401:
+            return False, "http_401_unauthorized"
+        if exc.code == 403:
+            return False, "http_403_forbidden"
+        return False, f"http_{exc.code}"
+
+    except URLError as exc:
+        return False, (
+            f"network_error: {exc.reason}"
+        )[:500]
+
     except Exception as exc:
-        return False, f"{type(exc).__name__}: {exc}"[:500]
+        return False, (
+            f"{type(exc).__name__}: {exc}"
+        )[:500]
 
 
 def _inspect_task(conn, task_id: str) -> dict[str, Any] | None:
@@ -203,10 +308,16 @@ def _guarded_respawn(conn, task_id: str, *args, **kwargs):
         return None
 
     now = time.monotonic()
-    last = _LAST_UNAVAILABLE_LOG.get(task_id, 0.0)
-    if now - last >= 60:
-        _LAST_UNAVAILABLE_LOG[task_id] = now
-        _audit("gwrm_preflight_hold", task_id=task_id, detail=detail)
+    audit_key = (task_id, detail)
+    last = _LAST_UNAVAILABLE_LOG.get(audit_key, 0.0)
+    if now - last >= _GWRM_AUDIT_INTERVAL_SECONDS:
+        _LAST_UNAVAILABLE_LOG[audit_key] = now
+        _audit(
+            "gwrm_preflight_hold",
+            task_id=task_id,
+            reason_code=detail.split(":", 1)[0],
+            detail=detail,
+        )
     # Returning a reason prevents claim/spawn for this dispatcher tick only.
     # The task stays READY; no LLM attempt is consumed.
     return "gwrm_preflight_unavailable"
