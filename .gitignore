@@ -363,4 +363,5 @@
 # Desconsiderando operational-hardening
 /hermes-data/operational-hardening/
 
-/TOOLs/HOTFIX*
+/TOOLs/HOTFIX/*
+/TOOLs/checkpoints/*
