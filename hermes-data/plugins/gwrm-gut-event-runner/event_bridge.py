@@ -5,15 +5,33 @@ import hmac
 import json
 import os
 import sqlite3
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
+from urllib.request import ProxyHandler, Request, build_opener
 
 STATE_DB = Path("/opt/data/logs/gwrm-gut-event-runner/state-v1.sqlite3")
 TOKEN_FILE = Path("/opt/data/logs/gwrm-gut-event-runner/event-token")
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("HERMES_GUT_EVENT_BRIDGE_PORT", "8653"))
+# HERMES_GUT_EVENT_RECONCILE_2026_09_14
+CONTROL_URL = str(
+    os.environ.get("GWRM_CONTROL_URL")
+    or "http://host.docker.internal:8130"
+).rstrip("/")
+API_KEY = str(os.environ.get("GWRM_API_KEY") or "").strip()
+RECONCILE_INTERVAL_SECONDS = max(
+    5.0,
+    float(os.environ.get("HERMES_GUT_RECONCILE_INTERVAL_SECONDS", "15")),
+)
+RECONCILE_GRACE_SECONDS = max(
+    0,
+    int(os.environ.get("HERMES_GUT_RECONCILE_GRACE_SECONDS", "5")),
+)
+_OPENER = build_opener(ProxyHandler({}))
 
 
 def _db() -> sqlite3.Connection:
@@ -185,6 +203,141 @@ def _resume_wait(operation_id: str, payload: dict[str, Any]) -> tuple[int, dict[
         conn.close()
 
 
+def _gwrm_status(operation_id: str) -> dict[str, Any]:
+    if not API_KEY:
+        raise RuntimeError("GWRM_API_KEY missing from event bridge environment")
+
+    body = json.dumps(
+        {
+            "name": "get_gut_run_status",
+            "arguments": {"operation_id": operation_id},
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    request = Request(
+        f"{CONTROL_URL}/api/v1/tools/call",
+        data=body,
+        method="POST",
+        headers={
+            "content-type": "application/json",
+            "X-API-Key": API_KEY,
+        },
+    )
+
+    try:
+        with _OPENER.open(request, timeout=10.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"GWRM HTTP {exc.code}: {detail or exc.reason}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("GWRM status response is not an object")
+
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            str(payload.get("error") or "GWRM status response missing result")
+        )
+
+    return result
+
+
+def _reconcile_waits_once() -> dict[str, int]:
+    stats = {
+        "checked": 0,
+        "terminal": 0,
+        "resumed": 0,
+        "errors": 0,
+    }
+
+    if not API_KEY:
+        return stats
+
+    conn = _db()
+    try:
+        cutoff = int(time.time()) - RECONCILE_GRACE_SECONDS
+        waits = conn.execute(
+            """
+            SELECT operation_id, state, updated_at
+            FROM waits
+            WHERE state IN ('registered', 'parked')
+              AND updated_at <= ?
+            ORDER BY updated_at ASC
+            """,
+            (cutoff,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for wait in waits:
+        operation_id = str(wait["operation_id"])
+        stats["checked"] += 1
+        try:
+            payload = _gwrm_status(operation_id)
+            if payload.get("terminal") is not True:
+                continue
+
+            stats["terminal"] += 1
+            status, response = _resume_wait(operation_id, payload)
+
+            if status == 200:
+                stats["resumed"] += 1
+                print(
+                    "gwrm-gut-event-bridge reconcile "
+                    f"operation_id={operation_id} "
+                    f"result={response.get('reason')}",
+                    flush=True,
+                )
+            elif (
+                status == 409
+                and response.get("reason") == "TASK_NOT_PARKED_YET"
+            ):
+                # _resume_wait stores terminal_events before checking the
+                # Kanban state. The runner's race-safe path will consume it.
+                print(
+                    "gwrm-gut-event-bridge reconcile terminal-before-park "
+                    f"operation_id={operation_id}",
+                    flush=True,
+                )
+            else:
+                print(
+                    "gwrm-gut-event-bridge reconcile deferred "
+                    f"operation_id={operation_id} "
+                    f"http={status} reason={response.get('reason')}",
+                    flush=True,
+                )
+        except Exception as exc:
+            stats["errors"] += 1
+            print(
+                "gwrm-gut-event-bridge reconcile error "
+                f"operation_id={operation_id} "
+                f"error={type(exc).__name__}:{str(exc)[:300]}",
+                flush=True,
+            )
+
+    return stats
+
+
+def _reconcile_loop() -> None:
+    while True:
+        try:
+            _reconcile_waits_once()
+        except Exception as exc:
+            print(
+                "gwrm-gut-event-bridge reconcile loop error "
+                f"{type(exc).__name__}:{str(exc)[:500]}",
+                flush=True,
+            )
+        time.sleep(RECONCILE_INTERVAL_SECONDS)
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "HermesGutEventBridge/1.0"
 
@@ -247,6 +400,12 @@ def main() -> None:
     if not TOKEN_FILE.exists() or not _token():
         raise SystemExit(f"missing event token: {TOKEN_FILE}")
     _db().close()
+    reconcile_thread = threading.Thread(
+        target=_reconcile_loop,
+        name="gwrm-gut-event-reconcile",
+        daemon=True,
+    )
+    reconcile_thread.start()
     server = HTTPServer((HOST, PORT), Handler)
     print(f"hermes-gut-event-bridge listening on {HOST}:{PORT}", flush=True)
     server.serve_forever()

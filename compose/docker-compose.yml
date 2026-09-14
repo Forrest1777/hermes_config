@@ -117,6 +117,7 @@ services:
 
   # HERMES_TODO3_EVENT_BRIDGE_2026_09_13
   hermes-gut-event-bridge:
+    # HERMES_GUT_EVENT_BRIDGE_SHARED_STATE_2026_09_14
     image: nousresearch/hermes-agent:latest
     container_name: hermes-gut-event-bridge
     entrypoint: ["/opt/hermes/.venv/bin/python"]
@@ -126,8 +127,15 @@ services:
     volumes:
       - "E:/dev/ai_agents/hermes/hermes-data:/opt/data"
       - "E:/dev/ai_agents/hermes/workspace:/workspace"
+      - "E:/dev/ai_agents/hermes/logs/runtime:/opt/data/logs"
+      - "hermes-kanban:/var/lib/hermes-kanban"
     environment:
       HERMES_HOME: /opt/data
+      HERMES_KANBAN_HOME: /var/lib/hermes-kanban
+      GWRM_CONTROL_URL: "http://host.docker.internal:8130"
+      GWRM_API_KEY: "${GWRM_API_KEY}"
+      HERMES_GUT_RECONCILE_INTERVAL_SECONDS: "15"
+      HERMES_GUT_RECONCILE_GRACE_SECONDS: "5"
       HERMES_GUT_EVENT_BRIDGE_PORT: "8653"
     restart: unless-stopped
 volumes:
