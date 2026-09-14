@@ -1,5 +1,5 @@
 name: operational-cost-telemetry
-version: 1.0.0
-description: Read-only deterministic operational cost aggregation across Kanban task_runs and Hermes profile session telemetry.
+version: 1.1.0
+description: Read-only operational cost aggregation with TODO3 event-driven GUT telemetry across Kanban runs and Hermes sessions.
 provides_tools:
   - operational_cost_report

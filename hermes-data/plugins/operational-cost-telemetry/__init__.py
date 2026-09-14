@@ -19,10 +19,11 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 NAME = "operational-cost-telemetry"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 TOOLSET = "operational_cost_telemetry"
 ALLOWED_PROFILES = {"implementation-orchestrator"}
 MARKER = "HERMES_OPERATIONAL_COST_TELEMETRY_2026_09_07"
+TODO4_MARKER = "HERMES_TODO4_EVENT_TELEMETRY_2026_09_13"
 
 REPORT_SCHEMA = {
     "name": "operational_cost_report",
@@ -84,8 +85,8 @@ def _cfg() -> dict[str, Any]:
         "max_cards": 1000,
         "max_sessions": 5000,
         "top_n": 10,
-        "gwrm_events_path": "/opt/data/logs/gwrm-gut-runner/events.jsonl",
-        "gwrm_cache_path": "/opt/data/logs/gwrm-gut-runner/terminal-cache-v2.json",
+        "gwrm_events_path": "/opt/data/logs/gwrm-gut-event-runner/events.jsonl",
+        "gwrm_cache_path": "/opt/data/logs/gwrm-gut-event-runner/state-v1.sqlite3",
         "auto_report_on_session_end": True,
     }
     try:
@@ -426,6 +427,37 @@ def _load_gwrm_audit(path: Path, scoped_task_ids: set[str]) -> list[dict[str, An
 def _load_gwrm_cache_by_operation(path: Path) -> dict[str, dict[str, Any]]:
     if not path.is_file():
         return {}
+
+    if path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
+        out: dict[str, dict[str, Any]] = {}
+        db = None
+        try:
+            db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+            rows = db.execute(
+                "SELECT operation_id, payload_json, received_at FROM terminal_events"
+            ).fetchall()
+            for operation_id, payload_json, received_at in rows:
+                try:
+                    payload = json.loads(str(payload_json or ""))
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                payload = dict(payload)
+                payload["_hermes_received_at_epoch"] = received_at
+                op = str(operation_id or payload.get("operation_id") or "").strip()
+                if op:
+                    out[op] = payload
+            db.close()
+        except Exception:
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:
+                pass
+            return {}
+        return out
+
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -443,7 +475,6 @@ def _load_gwrm_cache_by_operation(path: Path) -> dict[str, dict[str, Any]]:
         if op:
             out[op] = payload
     return out
-
 
 def _build_gut_telemetry(
     runs: list[dict[str, Any]],
@@ -476,6 +507,8 @@ def _build_gut_telemetry(
             "terminal_cache_hits": 0,
             "wait_existing_calls": 0,
             "wait_window_expirations": 0,
+            "event_parked": 0,
+            "event_collected": 0,
             "sources": set(),
         })
 
@@ -521,27 +554,39 @@ def _build_gut_telemetry(
             d["wait_existing_calls"] += 1
         elif ev == "wait_window_expired":
             d["wait_window_expirations"] += 1
+        elif ev == "parked":
+            d["event_parked"] += 1
+        elif ev == "collected":
+            d["event_collected"] += 1
+            if ts is not None:
+                d["terminal_ts"] = ts
         elif ev == "terminal":
             d["status"] = row.get("status") or d["status"]
             if row.get("passed") is not None:
                 d["passed"] = bool(row.get("passed"))
             if ts is not None:
                 d["terminal_ts"] = ts
-        d["sources"].add("gwrm_gut_runner_audit")
+        d["sources"].add("gwrm_gut_event_runner_audit")
 
     for op, payload in cached.items():
         if op not in ops:
             continue
         d = ensure(op)
-        counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+        result_payload = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+        counts = result_payload.get("counts") if isinstance(result_payload.get("counts"), dict) else {}
         for key in ("scripts", "tests", "asserts", "failing_tests", "errors"):
             if d["counts"].get(key) is None and counts.get(key) is not None:
                 d["counts"][key] = counts.get(key)
-        if d["duration_ms"] is None and payload.get("duration_ms") is not None:
-            d["duration_ms"] = payload.get("duration_ms")
-            d["duration_source"] = "gwrm_terminal_cache"
-        if d["passed"] is None and payload.get("passed") is not None:
-            d["passed"] = bool(payload.get("passed"))
+        if d["duration_ms"] is None and result_payload.get("duration_ms") is not None:
+            d["duration_ms"] = result_payload.get("duration_ms")
+            d["duration_source"] = "gwrm_event_state_db"
+        if d["passed"] is None and result_payload.get("passed") is not None:
+            d["passed"] = bool(result_payload.get("passed"))
+        if payload.get("status"):
+            d["status"] = payload.get("status")
+        received_at = _f(payload.get("_hermes_received_at_epoch"))
+        if d["terminal_ts"] is None and received_at is not None:
+            d["terminal_ts"] = received_at
         if not d["selection"]:
             sel = payload.get("selection")
             if isinstance(sel, dict):
@@ -549,7 +594,7 @@ def _build_gut_telemetry(
                 d["selection"] = f"{typ}:{val}" if typ and val else None
             elif sel:
                 d["selection"] = str(sel)
-        d["sources"].add("gwrm_terminal_cache")
+        d["sources"].add("gwrm_event_state_db")
 
     operation_rows: list[dict[str, Any]] = []
     for op in sorted(ops):
@@ -572,6 +617,8 @@ def _build_gut_telemetry(
             "started_reuse_hits": 0,
             "wait_existing_calls": 0,
             "wait_window_expirations": 0,
+            "event_parked": 0,
+            "event_collected": 0,
             "known_duration_ms": 0,
             "observed_wall_ms": 0,
             "tests": 0,
@@ -583,6 +630,8 @@ def _build_gut_telemetry(
         d["started_reuse_hits"] += _n(op.get("started_reuse_hits"))
         d["wait_existing_calls"] += _n(op.get("wait_existing_calls"))
         d["wait_window_expirations"] += _n(op.get("wait_window_expirations"))
+        d["event_parked"] += _n(op.get("event_parked"))
+        d["event_collected"] += _n(op.get("event_collected"))
         d["known_duration_ms"] += _n(op.get("duration_ms"))
         d["observed_wall_ms"] += _n(op.get("observed_wall_ms"))
         d["tests"] += _n((op.get("counts") or {}).get("tests"))
@@ -619,6 +668,12 @@ def _build_gut_telemetry(
             "started_reuse_hits": sum(_n(o.get("started_reuse_hits")) for o in operation_rows),
             "wait_existing_calls": sum(_n(o.get("wait_existing_calls")) for o in operation_rows),
             "wait_window_expirations": sum(_n(o.get("wait_window_expirations")) for o in operation_rows),
+        },
+        "event_driven": {
+            "parked_events": sum(_n(o.get("event_parked")) for o in operation_rows),
+            "collected_events": sum(_n(o.get("event_collected")) for o in operation_rows),
+            "parked_operations": sum(1 for o in operation_rows if _n(o.get("event_parked")) > 0),
+            "collected_operations": sum(1 for o in operation_rows if _n(o.get("event_collected")) > 0),
         },
         "operations": operation_rows,
         "top_repeated_operations": repeated[:max(1, top_n)],
@@ -1171,9 +1226,9 @@ def _build_report(
             "Worker runtime is summed from task_runs.started_at/ended_at; session ended_at is not used for duration.",
             "Resumption count is run-level: every task run after that task's first run. Its kind is classified from the previous run outcome.",
             "Block/retry reason labels come from structured run metadata/error or explicit summary prefixes; missing reasons are not invented.",
-            "GUT operations come from task-run structured test metadata plus gwrm-gut-runner audit/cache; missing counts/durations remain null.",
+            "GUT operations come from task-run metadata plus TODO3 gwrm-gut-event-runner audit/event-state DB; legacy runner sources require explicit override.",
             "GWRM observed_wall_ms is audit-event wall time; duration_ms is only used when structured task/cache evidence provides it.",
-            "GWRM terminal_cache_hit/reused_existing_operation/wait_existing are counted as reuse signals, not new test operations.",
+            "TODO3 event-driven parked/collected signals are reported separately; legacy polling reuse counters remain schema-compatible and should be zero in the active path.",
             "USD is reported only when Hermes marks actual/estimated session cost as available; missing pricing remains unknown.",
             "Runs lacking metadata.worker_session_id remain explicitly unavailable; no temporal/profile heuristic is used.",
             "Aggregate token totals deduplicate repeated worker_session_id values to avoid double counting.",

@@ -634,3 +634,31 @@ Rules:
 - only the user performs push.
 
 This policy supersedes earlier WAIT_WINDOW_EXPIRED/wait-existing guidance.
+
+<!-- HERMES_THIN_ORCHESTRATOR_TODO4_2026_09_13:BEGIN -->
+## Thin orchestrator + operational telemetry
+
+Este bloco prevalece sobre rotinas historicas de bootstrap/retomada mais custosas quando os mesmos fatos puderem ser obtidos deterministicamente.
+
+### Bootstrap e retomada compactos
+- Na primeira acao de uma run do root, chame `orchestrator_compact_state` uma unica vez.
+- Use o snapshot como fonte de fatos para status do root, dependencias, eventos recentes, checkpoint/handoffs e Git da worktree.
+- Nao repita `kanban_show`, `kanban_list`, `git status`, leitura integral de comentarios ou reconstrucoes equivalentes quando o snapshot ja contiver o fato necessario.
+- Reconsulte o snapshot somente depois de uma mutacao material que possa ter invalidado os fatos ou apos uma retomada nova.
+- Quando faltar um fato especifico, consulte apenas essa lacuna; nao refaca discovery amplo.
+
+### Orquestrador fino
+- O orquestrador coordena; implementacao normal continua pertencendo a cards `implementation-worker`.
+- Nao use `delegate_task`/subagentes dentro da run do root. Review/analise que exija lifecycle proprio deve ser card duravel.
+- Prefira identificadores duraveis (`card_id`, commit, operation_id, path, checkpoint version) a colar logs ou codigo extensos.
+- Depois de integrar um child, leia somente handoff/delta/evidencia nova.
+- Operacoes mecanicas deterministicas devem permanecer nos plugins owners existentes (`worktree_guardian`, `operational_sync`, `local_main_delivery`, `gwrm_gut_event_runner`).
+- Nao execute GUT, Graphify, sync documental ou delivery local novamente apenas para reconstruir contexto ja validado.
+
+### Telemetria
+- `operational_cost_report` continua observabilidade read-only e nao completion gate.
+- A fonte GUT primaria e o fluxo event-driven `gwrm-gut-event-runner`; dados do runner polling antigo sao somente compatibilidade historica quando configurados explicitamente.
+- Relatorio automatico de fechamento continua no `on_session_end`, sem nova chamada LLM.
+- Nao gere relatorios repetidos no meio da fase.
+- Use `event_driven.parked_events`, `event_driven.collected_events`, retries/resumptions, tool calls e volume de tokens para identificar overhead operacional.
+<!-- HERMES_THIN_ORCHESTRATOR_TODO4_2026_09_13:END -->
