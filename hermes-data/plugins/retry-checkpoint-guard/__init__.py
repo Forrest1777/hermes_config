@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import logging
+import sqlite3
 import subprocess
 import threading
 import time
@@ -158,6 +159,64 @@ def _authorized_recovery(task_id: str, workspace: Path, status: dict[str, Any]) 
         return None
 
 
+
+# HERMES_GWRM_OPERATIONAL_RESUME_RETRY_BYPASS_2026_09_14
+_GWRM_EVENT_STATE_DB = Path(
+    "/opt/data/logs/gwrm-gut-event-runner/state-v1.sqlite3"
+)
+
+
+def _authorize_gwrm_event_resume(task_id: str) -> dict[str, Any] | None:
+    if not _GWRM_EVENT_STATE_DB.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(_GWRM_EVENT_STATE_DB), timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT w.operation_id,w.state,w.run_id,w.updated_at "
+            "FROM waits w JOIN terminal_events e ON e.operation_id=w.operation_id "
+            "WHERE w.task_id=? "
+            "AND w.state IN ('resumed','resume_dispatch_authorized') "
+            "ORDER BY w.updated_at DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            return None
+
+        operation_id = str(row["operation_id"])
+        if str(row["state"]) == "resumed":
+            with conn:
+                cur = conn.execute(
+                    "UPDATE waits "
+                    "SET state='resume_dispatch_authorized',updated_at=? "
+                    "WHERE operation_id=? AND state='resumed'",
+                    (int(time.time()), operation_id),
+                )
+            if cur.rowcount != 1:
+                check = conn.execute(
+                    "SELECT state FROM waits WHERE operation_id=?",
+                    (operation_id,),
+                ).fetchone()
+                if check is None or str(check["state"]) != "resume_dispatch_authorized":
+                    conn.close()
+                    return None
+
+        conn.close()
+        return {
+            "operation_id": operation_id,
+            "run_id": int(row["run_id"]),
+            "state": "resume_dispatch_authorized",
+        }
+    except Exception as exc:
+        _audit({
+            "event": "gwrm_operational_resume_probe_failed",
+            "task_id": task_id,
+            "error": f"{type(exc).__name__}: {exc}"[:1000],
+        })
+        return None
+
+
 def _inspect_retry_checkpoint(
     conn,
     task_id: str,
@@ -206,6 +265,16 @@ def _inspect_retry_checkpoint(
 
     # First execution is not a retry.
     if run_count < 1:
+        return None
+
+    gwrm_resume = _authorize_gwrm_event_resume(task_id)
+    if gwrm_resume is not None:
+        _audit({
+            "event": "gwrm_operational_resume_allowed",
+            "task_id": task_id,
+            "run_count": run_count,
+            **gwrm_resume,
+        })
         return None
 
     raw_workspace = str(

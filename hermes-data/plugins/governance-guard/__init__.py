@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import stat
 import tempfile
@@ -255,6 +256,47 @@ def _profile_governed(profile: str | None) -> bool:
     policy = _load_policy()
     configured = policy.get("governed_profiles") or []
     return bool(profile and profile in {str(x) for x in configured})
+
+
+
+# HERMES_GWRM_OPERATIONAL_RESUME_ATTEMPT_SEMANTICS_2026_09_14
+_GWRM_EVENT_STATE_DB = Path(
+    "/opt/data/logs/gwrm-gut-event-runner/state-v1.sqlite3"
+)
+
+
+def _consume_gwrm_resume_dispatch_authorization(task_id: str) -> str | None:
+    if not _GWRM_EVENT_STATE_DB.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(_GWRM_EVENT_STATE_DB), timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT w.operation_id FROM waits w "
+            "JOIN terminal_events e ON e.operation_id=w.operation_id "
+            "WHERE w.task_id=? AND w.state='resume_dispatch_authorized' "
+            "ORDER BY w.updated_at DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            return None
+
+        operation_id = str(row["operation_id"])
+        with conn:
+            cur = conn.execute(
+                "UPDATE waits SET state='resume_dispatched',updated_at=? "
+                "WHERE operation_id=? AND state='resume_dispatch_authorized'",
+                (int(time.time()), operation_id),
+            )
+        conn.close()
+        return operation_id if cur.rowcount == 1 else None
+    except Exception as exc:
+        logger.warning(
+            "GWRM operational resume consume failed task=%s error=%s",
+            task_id, exc,
+        )
+        return None
 
 
 def _run_id() -> str | None:
@@ -650,12 +692,14 @@ def _on_worker_spawned(task_id=None, assignee=None, worker_pid=None, workspace_p
         }
         tenant = hinted_tenant if hinted_tenant is not None else scope.get("tenant")
         runs = task.setdefault("runs", {})
-        if rid not in runs:
+        gwrm_resume_operation_id = _consume_gwrm_resume_dispatch_authorization(tid)
+        if rid not in runs and gwrm_resume_operation_id is None:
             task["total_attempts"] = int(task.get("total_attempts") or 0) + 1
         runs[rid] = {
             **(runs.get(rid) or {}), "run_id": run_id, "profile": profile,
             "board": effective_board, "tenant": tenant, "worker_pid": worker_pid,
             "workspace_path": workspace_path, "started_at": _utc_now(), "before": before,
+            "gwrm_event_resume_operation_id": gwrm_resume_operation_id,
             "tool_calls": int((runs.get(rid) or {}).get("tool_calls") or 0),
             "tool_counts": dict((runs.get(rid) or {}).get("tool_counts") or {}),
         }

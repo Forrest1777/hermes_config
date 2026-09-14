@@ -80,6 +80,20 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.wfile.write(body)
 
 
+
+# HERMES_GWRM_OPERATIONAL_BLOCK_RECURRENCE_RESET_2026_09_14
+def _reset_operational_block_recurrences(kb, conn, task_id: str) -> bool:
+    try:
+        with kb.write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET block_recurrences=0 WHERE id=?",
+                (task_id,),
+            )
+        return cur.rowcount == 1
+    except Exception:
+        return False
+
+
 def _resume_wait(operation_id: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     conn = _db()
     try:
@@ -146,6 +160,16 @@ def _resume_wait(operation_id: str, payload: dict[str, Any]) -> tuple[int, dict[
                     return 409, {
                         "ok": False,
                         "reason": "UNBLOCK_REFUSED",
+                        "operation_id": operation_id,
+                        "task_id": str(wait["task_id"]),
+                    }
+
+                if not _reset_operational_block_recurrences(
+                    kb, kb_conn, str(wait["task_id"])
+                ):
+                    return 500, {
+                        "ok": False,
+                        "reason": "BLOCK_RECURRENCE_RESET_FAILED",
                         "operation_id": operation_id,
                         "task_id": str(wait["task_id"]),
                     }
