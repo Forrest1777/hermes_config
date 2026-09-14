@@ -1,8 +1,10 @@
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
@@ -74,11 +76,86 @@ def _request_json(method, path, timeout=30.0):
     return json.loads(raw.decode("utf-8"))
 
 
+
+# HERMES_GWRM_GUT_EVENT_LEASE_2026_09_14
+_GUT_EVENT_STATE_DB = Path(
+    "/opt/data/logs/gwrm-gut-event-runner/state-v1.sqlite3"
+)
+
+
+def _active_gut_event_lease(task_id):
+    if not isinstance(task_id, str) or not task_id.strip():
+        return None
+    if not _GUT_EVENT_STATE_DB.exists():
+        return None
+
+    try:
+        conn = sqlite3.connect(str(_GUT_EVENT_STATE_DB), timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT w.operation_id,w.run_id,w.state,w.updated_at "
+            "FROM waits w LEFT JOIN terminal_events e "
+            "ON e.operation_id=w.operation_id "
+            "WHERE w.task_id=? "
+            "AND w.state IN ('registered','parked') "
+            "AND e.operation_id IS NULL "
+            "ORDER BY w.updated_at DESC LIMIT 1",
+            (task_id.strip(),),
+        ).fetchone()
+        conn.close()
+
+        if row is None:
+            return None
+
+        return {
+            "operation_id": str(row["operation_id"]),
+            "run_id": int(row["run_id"]),
+            "state": str(row["state"]),
+            "updated_at": int(row["updated_at"]),
+        }
+
+    except Exception as exc:
+        # Fail closed: if ownership cannot be proven safe, never kill a
+        # potentially active event-driven GUT process.
+        LOG.warning(
+            "[GWRM_LIFECYCLE] GUT lease probe failed; cleanup deferred "
+            "task=%s error=%s",
+            task_id,
+            exc,
+        )
+        return {
+            "operation_id": None,
+            "run_id": None,
+            "state": "probe_failed",
+            "updated_at": None,
+        }
+
+
+def _cleanup_deferred_by_gut_lease(task_id, event_name):
+    lease = _active_gut_event_lease(task_id)
+    if lease is None:
+        return False
+
+    LOG.info(
+        "[GWRM_LIFECYCLE] cleanup deferred by active GUT lease "
+        "event=%s task=%s operation_id=%s run_id=%s state=%s",
+        event_name,
+        task_id,
+        lease.get("operation_id"),
+        lease.get("run_id"),
+        lease.get("state"),
+    )
+    return True
+
+
 def _deactivate(task_id, event_name):
     if not isinstance(task_id, str) or not task_id.strip():
         return False
 
     task_id = task_id.strip()
+
+    if _cleanup_deferred_by_gut_lease(task_id, event_name):
+        return True
 
     try:
         payload = _request_json(

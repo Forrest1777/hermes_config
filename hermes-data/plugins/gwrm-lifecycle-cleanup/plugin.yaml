@@ -1,5 +1,5 @@
 name: gwrm-lifecycle-cleanup
-version: "1.0.0"
+version: "1.0.1"
 description: Automatic GWRM teardown for Hermes Kanban worker lifecycle.
 provides_hooks:
   - kanban_task_completed
