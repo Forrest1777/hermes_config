@@ -395,15 +395,20 @@ def _format_reset(ts: int | None) -> tuple[str | None, str]:
 
 # HERMES_OPERATIONAL_HARDENING_2026_09_03: provider budget is a deferred retry state, not an immediate human gate.
 def _provider_recovery_config(policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    # HERMES_PROVIDER_WAIT_MANUAL_READY_2026_09_14
+    # max_automatic_retries <= 0 means unlimited operational retries.
     raw = ((policy or _load_policy()).get("provider_recovery") or {})
     try:
         interval_minutes = max(1, int(raw.get("retry_interval_minutes") or 20))
     except Exception:
         interval_minutes = 20
     try:
-        max_retries = max(0, int(raw.get("max_automatic_retries") or 12))
+        raw_limit = raw.get("max_automatic_retries", 0)
+        max_retries = 0 if raw_limit is None else int(raw_limit)
+        if max_retries < 0:
+            max_retries = 0
     except Exception:
-        max_retries = 12
+        max_retries = 0
     try:
         ttl_minutes = max(5, int(raw.get("authorization_ttl_minutes") or 60))
     except Exception:
@@ -414,10 +419,33 @@ def _provider_recovery_config(policy: dict[str, Any] | None = None) -> dict[str,
         "max_automatic_retries": max_retries,
         "prefer_provider_reset_time": bool(raw.get("prefer_provider_reset_time", False)),
         "authorization_ttl_seconds": ttl_minutes * 60,
-        "one_probe_per_provider_per_dispatch_tick": bool(
-            raw.get("one_probe_per_provider_per_dispatch_tick", True)
-        ),
+        "one_probe_per_provider_per_dispatch_tick": bool(raw.get("one_probe_per_provider_per_dispatch_tick", True)),
     }
+
+
+def _provider_retry_limit_reached(retry_count: int, recovery: dict[str, Any]) -> bool:
+    try: limit = int(recovery.get("max_automatic_retries") or 0)
+    except Exception: limit = 0
+    return limit > 0 and int(retry_count or 0) >= limit
+
+
+def _provider_retry_limit_label(recovery: dict[str, Any]) -> str:
+    try: limit = int(recovery.get("max_automatic_retries") or 0)
+    except Exception: limit = 0
+    return "unlimited" if limit <= 0 else str(limit)
+
+
+def _provider_checkpoint_matches(wait: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+    checkpoint = wait.get("checkpoint") or {}
+    if not isinstance(checkpoint, dict) or not isinstance(snapshot, dict): return False
+    if not checkpoint.get("available") or not snapshot.get("available"): return False
+    try:
+        expected_path = str(Path(str(checkpoint.get("path") or "")).resolve(strict=False))
+        actual_path = str(Path(str(snapshot.get("path") or "")).resolve(strict=False))
+    except Exception:
+        return False
+    if not expected_path or expected_path != actual_path: return False
+    return bool(str(checkpoint.get("head") or "") == str(snapshot.get("head") or "") and str(checkpoint.get("status_sha256") or "") == str(snapshot.get("status_sha256") or ""))
 
 
 def _next_provider_retry_at(info: dict[str, Any], recovery: dict[str, Any]) -> int:
@@ -693,27 +721,60 @@ def _on_worker_spawned(task_id=None, assignee=None, worker_pid=None, workspace_p
         tenant = hinted_tenant if hinted_tenant is not None else scope.get("tenant")
         runs = task.setdefault("runs", {})
         gwrm_resume_operation_id = _consume_gwrm_resume_dispatch_authorization(tid)
-        if rid not in runs and gwrm_resume_operation_id is None:
+        wait = task.get("provider_wait")
+        provider_wait_state = str(wait.get("state") or "") if isinstance(wait, dict) else ""
+        provider_manual_resume = bool(isinstance(wait, dict) and provider_wait_state == "WAITING" and _provider_checkpoint_matches(wait, before))
+        provider_scheduled_resume = bool(isinstance(wait, dict) and provider_wait_state == "RESUMING")
+        provider_resume = provider_manual_resume or provider_scheduled_resume
+        provider_resume_trigger = "manual_ready" if provider_manual_resume else ("timer" if provider_scheduled_resume else None)
+        provider_resume_epoch = None
+        provider_resume_case_id = None
+        provider_resume_provider = None
+
+        if provider_manual_resume:
+            recovery = _provider_recovery_config()
+            provider_resume_epoch = int(task.get("resume_epoch") or 0) + 1
+            task["resume_epoch"] = provider_resume_epoch
+            task["provider_retry_count"] = int(task.get("provider_retry_count") or 0) + 1
+            provider_resume_case_id = str(wait.get("case_id") or "")
+            provider_resume_provider = str(wait.get("provider") or "")
+            wait["state"] = "RESUMING"
+            wait["resume_epoch"] = provider_resume_epoch
+            wait["last_resume_at"] = _utc_now()
+            wait["resume_trigger"] = "manual_ready"
+            checkpoint = wait.get("checkpoint") or {}
+            dirty_checkpoint = bool(isinstance(checkpoint, dict) and checkpoint.get("available") and int(checkpoint.get("changed_entries") or 0) > 0 and checkpoint.get("path") and checkpoint.get("head") and checkpoint.get("status_sha256"))
+            if dirty_checkpoint:
+                task["authorized_recovery_checkpoint"] = {
+                    "state": "AUTHORIZED", "reason": "provider_recovery", "case_id": provider_resume_case_id,
+                    "resume_epoch": provider_resume_epoch, "workspace": checkpoint.get("path"), "head": checkpoint.get("head"),
+                    "status_sha256": checkpoint.get("status_sha256"), "authorized_at": int(time.time()),
+                    "expires_at": int(time.time()) + int(recovery.get("authorization_ttl_seconds") or 3600), "manual_retry": True,
+                }
+            entry = state.setdefault("providers", {}).setdefault(provider_resume_provider, {})
+            entry["state"] = "PROBING"; entry["probe_task_id"] = tid; entry["probe_resume_epoch"] = provider_resume_epoch; entry["probe_started_at"] = _utc_now(); entry["human_reset_required"] = False
+            index = (state.get("cases") or {}).get(provider_resume_case_id)
+            if isinstance(index, dict): index["status"] = "RETRY_AUTHORIZED"
+        elif provider_scheduled_resume:
+            provider_resume_epoch = int(wait.get("resume_epoch") or 0)
+            provider_resume_case_id = str(wait.get("case_id") or "")
+            provider_resume_provider = str(wait.get("provider") or "")
+
+        if rid not in runs and gwrm_resume_operation_id is None and not provider_resume:
             task["total_attempts"] = int(task.get("total_attempts") or 0) + 1
         runs[rid] = {
-            **(runs.get(rid) or {}), "run_id": run_id, "profile": profile,
-            "board": effective_board, "tenant": tenant, "worker_pid": worker_pid,
-            "workspace_path": workspace_path, "started_at": _utc_now(), "before": before,
-            "gwrm_event_resume_operation_id": gwrm_resume_operation_id,
-            "tool_calls": int((runs.get(rid) or {}).get("tool_calls") or 0),
-            "tool_counts": dict((runs.get(rid) or {}).get("tool_counts") or {}),
+            **(runs.get(rid) or {}), "run_id": run_id, "profile": profile, "board": effective_board, "tenant": tenant,
+            "worker_pid": worker_pid, "workspace_path": workspace_path, "started_at": _utc_now(), "before": before,
+            "gwrm_event_resume_operation_id": gwrm_resume_operation_id, "provider_recovery_resume": provider_resume,
+            "provider_recovery_resume_trigger": provider_resume_trigger, "provider_recovery_resume_epoch": provider_resume_epoch,
+            "tool_calls": int((runs.get(rid) or {}).get("tool_calls") or 0), "tool_counts": dict((runs.get(rid) or {}).get("tool_counts") or {}),
         }
         authorization = task.get("authorized_recovery_checkpoint")
         if isinstance(authorization, dict) and authorization.get("state") == "AUTHORIZED":
-            authorization["state"] = "IN_USE"
-            authorization["run_id"] = rid
-            authorization["claimed_at"] = _utc_now()
-            runs[rid]["resume_epoch"] = authorization.get("resume_epoch")
-            wait = task.get("provider_wait")
-            if isinstance(wait, dict) and wait.get("state") == "RESUMING":
-                wait["state"] = "RUNNING"
-                wait["run_id"] = rid
-        holder.update(board=effective_board, tenant=tenant, scope_status=scope.get("scope_status"))
+            authorization["state"] = "IN_USE"; authorization["run_id"] = rid; authorization["claimed_at"] = _utc_now(); runs[rid]["resume_epoch"] = authorization.get("resume_epoch")
+        if provider_resume and isinstance(wait, dict):
+            wait["state"] = "RUNNING"; wait["run_id"] = rid; wait["resume_epoch"] = provider_resume_epoch; wait["resume_trigger"] = provider_resume_trigger
+        holder.update(board=effective_board, tenant=tenant, scope_status=scope.get("scope_status"), provider_manual_resume=provider_manual_resume, provider_resume=provider_resume, provider_resume_trigger=provider_resume_trigger, provider_resume_epoch=provider_resume_epoch, provider_resume_case_id=provider_resume_case_id, provider_resume_provider=provider_resume_provider)
 
     try:
         _update_state(mutate)
@@ -733,6 +794,15 @@ def _on_worker_spawned(task_id=None, assignee=None, worker_pid=None, workspace_p
         _append_event("worker_spawn_board_mismatch", task_id=tid, run_id=run_id, profile=profile,
                       hook_board=_normalized_board(board), effective_board=holder.get("board"),
                       resolution="persisted_board_hint")
+    if holder.get("provider_manual_resume"):
+        case_id = str(holder.get("provider_resume_case_id") or "")
+        provider = str(holder.get("provider_resume_provider") or "")
+        resume_epoch = int(holder.get("provider_resume_epoch") or 0)
+        if case_id:
+            _update_case_status_file(case_id, "RETRY_AUTHORIZED", resume_epoch=resume_epoch, automatic_retry=False, manual_retry=True)
+        _comment_task(holder.get("board"), tid, "PROVIDER_RETRY_AUTHORIZED\ncase_id: %s\nprovider: %s\nresume_epoch: %s\nautomatic_retry: false\nmanual_retry: true\ntrigger: card_ready\nuser_action_required: false\n" % (case_id, provider, resume_epoch))
+        _append_event("provider_wait_manual_resume_claimed", task_id=tid, run_id=run_id, case_id=case_id, provider=provider, resume_epoch=resume_epoch, board=holder.get("board"))
+
     _append_event("attempt_started", task_id=tid, run_id=run_id, profile=profile,
                   board=holder.get("board"), tenant=holder.get("tenant"),
                   scope_status=holder.get("scope_status"), worker_pid=worker_pid, before=before)
@@ -3242,7 +3312,7 @@ def _arm_provider_wait(ctx, case: dict[str, Any], board: str | None, policy: dic
     def mutate(state):
         task = state.setdefault("tasks", {}).setdefault(task_id, {"total_attempts": 0, "runs": {}})
         retry_count = int(task.get("provider_retry_count") or 0)
-        exhausted = retry_count >= int(recovery.get("max_automatic_retries") or 0)
+        exhausted = _provider_retry_limit_reached(retry_count, recovery)
         provider_entry = state.setdefault("providers", {}).setdefault(provider, {})
         next_retry_at = int(
             provider_entry.get("next_retry_at")
@@ -3363,7 +3433,7 @@ def _resume_due_provider_waits(board_hint: str | None = None) -> None:
             continue
         probed_providers.add(provider)
         retry_count = int(task_snapshot.get("provider_retry_count") or 0)
-        if retry_count >= int(recovery.get("max_automatic_retries") or 0):
+        if _provider_retry_limit_reached(retry_count, recovery):
             continue
 
         holder: dict[str, Any] = {}
@@ -3382,7 +3452,7 @@ def _resume_due_provider_waits(board_hint: str | None = None) -> None:
             if int(wait.get("next_retry_at") or 0) > int(time.time()):
                 return
             current_count = int(task.get("provider_retry_count") or 0)
-            if current_count >= int(recovery.get("max_automatic_retries") or 0):
+            if _provider_retry_limit_reached(current_count, recovery):
                 wait["state"] = "HUMAN_REQUIRED"
                 return
             resume_epoch = int(task.get("resume_epoch") or 0) + 1
@@ -3463,20 +3533,20 @@ def _resume_due_provider_waits(board_hint: str | None = None) -> None:
 def _release_provider_probe(task_id: str, reason: str) -> None:
     holder = []
     def mutate(state):
+        task = (state.get("tasks") or {}).get(task_id)
+        if isinstance(task, dict):
+            wait = task.get("provider_wait")
+            if isinstance(wait, dict) and wait.get("state") in {"RUNNING", "RESUMING"}:
+                wait["state"] = "CONSUMED"; wait["closed_at"] = _utc_now(); wait["close_reason"] = reason
+            auth = task.get("authorized_recovery_checkpoint")
+            if isinstance(auth, dict) and str(auth.get("reason") or "") == "provider_recovery" and str(auth.get("state") or "") in {"AUTHORIZED", "IN_USE"}:
+                auth["state"] = "CONSUMED"; auth["consumed_at"] = _utc_now(); auth["consume_reason"] = reason
         for provider, entry in (state.get("providers") or {}).items():
             if isinstance(entry, dict) and entry.get("state") == "PROBING" and str(entry.get("probe_task_id") or "") == task_id:
-                entry["state"] = "CLOSED"
-                entry["closed_at"] = _utc_now()
-                entry["close_reason"] = reason
-                entry.pop("probe_task_id", None)
-                entry.pop("probe_resume_epoch", None)
-                holder.append(provider)
-    try:
-        _update_state(mutate)
-    except Exception:
-        return
-    for provider in holder:
-        _append_event("provider_probe_closed", task_id=task_id, provider=provider, reason=reason)
+                entry["state"] = "CLOSED"; entry["closed_at"] = _utc_now(); entry["close_reason"] = reason; entry.pop("probe_task_id", None); entry.pop("probe_resume_epoch", None); holder.append(provider)
+    try: _update_state(mutate)
+    except Exception: return
+    for provider in holder: _append_event("provider_probe_closed", task_id=task_id, provider=provider, reason=reason)
 
 
 def _on_worker_exited_factory(ctx):

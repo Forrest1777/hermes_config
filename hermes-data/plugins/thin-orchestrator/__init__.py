@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 NAME = "thin-orchestrator"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 TOOLSET = "thin_orchestrator"
 MARKER = "HERMES_THIN_ORCHESTRATOR_TODO4_2026_09_13"
 ALLOWED_PROFILES = {"implementation-orchestrator"}
@@ -303,3 +303,19 @@ def register(ctx: Any) -> None:
         check_fn=_available,
         emoji="🪶",
     )
+
+# HERMES_THIN_CANONICAL_CHECKPOINT_V2_2026_09_14
+_CHECKPOINT_KEYS = (
+    "phase_id",
+    "status",
+    "root_integration_branch",
+    "integration_target_branch",
+    "integration_head",
+    "architecture_revision",
+    "code_head",
+    "docs_head",
+    "delivery_target_branch",
+    "main_integration_pending",
+    "main_integrated",
+    "push_performed",
+)

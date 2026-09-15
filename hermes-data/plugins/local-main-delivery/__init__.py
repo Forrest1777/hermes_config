@@ -16,7 +16,7 @@ from typing import Any, Optional
 import yaml
 
 NAME = "local-main-delivery"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 TOOLSET = "local_main_delivery"
 ALLOWED_PROFILES = {"implementation-orchestrator"}
 MARKER = "HERMES_CANONICAL_LOCAL_DELIVERY_2026_09_13"
@@ -508,4 +508,352 @@ def register(ctx: Any) -> None:
         schema=FINALIZE_SCHEMA,
         handler=_finalize_handler,
         check_fn=_available,
+    )
+
+# HERMES_LOCAL_DELIVERY_RECOVERY_V2_2026_09_14
+_ORIGINAL_LOCAL_MAIN_DELIVERY_FINALIZE_V2 = _finalize_handler
+
+
+def _delivery_checkpoint_yaml_payload_v2(body: str) -> str:
+    text = str(body or "").strip()
+    lines = text.splitlines()
+    if lines and lines[0].startswith("OPERATIONAL_CHECKPOINT_CANONICAL"):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        text = "\n".join(lines).strip()
+
+    fenced = re.search(
+        r"```(?:yaml|yml)?\s*\r?\n(.*?)\r?\n```",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    return fenced.group(1).strip() if fenced else text
+
+
+def _extract_checkpoint_yaml(body: str) -> Optional[dict[str, Any]]:
+    text = str(body or "").strip()
+    if "operational_checkpoint" not in text.lower():
+        return None
+    try:
+        parsed = yaml.safe_load(
+            _delivery_checkpoint_yaml_payload_v2(text)
+        )
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _delivery_state_v2(cp: dict[str, Any]) -> dict[str, Any]:
+    nested = cp.get("_nested")
+    nested = nested if isinstance(nested, dict) else {}
+    state = cp.get("delivery_state")
+    if not isinstance(state, dict):
+        state = nested.get("delivery_state")
+    return dict(state) if isinstance(state, dict) else {}
+
+
+def _delivery_idempotent_v2(
+    cp: dict[str, Any],
+    root_workspace: Path,
+    main_worktree: Path,
+    target_branch: str,
+    timeout: int,
+) -> Optional[dict[str, Any]]:
+    delivery = _delivery_state_v2(cp)
+    nested = (
+        cp.get("_nested")
+        if isinstance(cp.get("_nested"), dict)
+        else {}
+    )
+    target = str(
+        cp.get("delivery_target_branch")
+        or nested.get("delivery_target_branch")
+        or delivery.get("delivery_target_branch")
+        or ""
+    ).strip()
+
+    if not (
+        target == target_branch
+        and delivery.get("main_integrated") is True
+        and delivery.get("main_integration_pending") is False
+        and delivery.get("push_performed") in (False, None)
+    ):
+        return None
+
+    expected = str(cp.get("_expected_head") or "")
+    root_head = _head(root_workspace, timeout)
+    main_head = _head(main_worktree, timeout)
+    root_clean, _ = _clean(root_workspace, timeout)
+    main_clean, _ = _clean(main_worktree, timeout)
+
+    if (
+        expected
+        and root_head == expected
+        and main_head == expected
+        and root_clean
+        and main_clean
+    ):
+        return {
+            "idempotent": True,
+            "final_head": expected,
+            "source_head": str(
+                delivery.get("integration_source_head")
+                or expected
+            ),
+        }
+    return None
+
+
+def _recover_partial_delivery_v2(
+    conn: Any,
+    *,
+    root_id: str,
+    cp: dict[str, Any],
+    root_branch: str,
+    root_workspace: Path,
+    main_worktree: Path,
+    target_branch: str,
+    timeout: int,
+) -> Optional[dict[str, Any]]:
+    expected_source = str(
+        cp.get("_expected_head") or ""
+    ).strip()
+    if not expected_source:
+        return None
+
+    root_clean, _ = _clean(root_workspace, timeout)
+    main_clean, _ = _clean(main_worktree, timeout)
+    if not root_clean or not main_clean:
+        return None
+
+    root_head = _head(root_workspace, timeout)
+    main_head = _head(main_worktree, timeout)
+    if not main_head or main_head == expected_source:
+        return None
+
+    parent = _git(
+        main_worktree,
+        ["rev-parse", "--verify", f"{main_head}^"],
+        timeout,
+    )
+    if (
+        parent.returncode != 0
+        or parent.stdout.strip() != expected_source
+    ):
+        return None
+
+    subject = _git(
+        main_worktree,
+        ["show", "-s", "--format=%s", main_head],
+        timeout,
+    )
+    phase_id = str(cp.get("_phase_id") or "")
+    expected_subject = (
+        f"docs(operational): record local main delivery {phase_id}"
+    )
+    if (
+        subject.returncode != 0
+        or subject.stdout.strip() != expected_subject
+    ):
+        return None
+
+    changed = _git(
+        main_worktree,
+        [
+            "diff",
+            "--name-only",
+            f"{expected_source}..{main_head}",
+            "--",
+        ],
+        timeout,
+    )
+    changed_paths = {
+        line.strip()
+        for line in changed.stdout.splitlines()
+        if line.strip()
+    } if changed.returncode == 0 else set()
+
+    allowed = {
+        "ai_system_docs/00-visao-geral/estado-atual-ai-system.md",
+        "ai_system_docs/05-orquestracao/implementation-manifest.yaml",
+    }
+    if not changed_paths or not changed_paths.issubset(allowed):
+        return None
+
+    for rel in changed_paths:
+        text = (
+            main_worktree / rel
+        ).read_text(encoding="utf-8")
+        if (
+            "HERMES_CANONICAL_DELIVERY_LATEST" not in text
+            or root_id not in text
+            or target_branch not in text
+        ):
+            return None
+
+    if root_head == expected_source:
+        ff = _git(
+            root_workspace,
+            ["merge", "--ff-only", main_head],
+            timeout,
+        )
+        if ff.returncode != 0:
+            raise RuntimeError(
+                "cannot recover exact partial delivery by ff root: "
+                f"{(ff.stderr or ff.stdout)[-1200:]}"
+            )
+        root_head = _head(root_workspace, timeout)
+
+    if root_head != main_head:
+        return None
+
+    _publish_checkpoint(
+        conn,
+        root_id=root_id,
+        cp=cp,
+        root_branch=root_branch,
+        target_branch=target_branch,
+        source_head=expected_source,
+        final_head=main_head,
+        main_before=expected_source,
+    )
+    return {
+        "recovered_partial_success": True,
+        "source_head": expected_source,
+        "final_head": main_head,
+    }
+
+
+def _finalize_handler(
+    args: dict[str, Any],
+    **kwargs: Any,
+) -> str:
+    if _profile() not in ALLOWED_PROFILES:
+        return _ORIGINAL_LOCAL_MAIN_DELIVERY_FINALIZE_V2(
+            args,
+            **kwargs,
+        )
+
+    root_id = str(
+        os.environ.get("HERMES_KANBAN_TASK") or ""
+    ).strip()
+    workspace_raw = str(
+        os.environ.get("HERMES_KANBAN_WORKSPACE") or ""
+    ).strip()
+    board = str(
+        os.environ.get("HERMES_KANBAN_BOARD") or ""
+    ).strip() or None
+
+    if not root_id or not workspace_raw:
+        return _ORIGINAL_LOCAL_MAIN_DELIVERY_FINALIZE_V2(
+            args,
+            **kwargs,
+        )
+
+    cfg = _cfg()
+    timeout = int(cfg.get("git_timeout_seconds") or 90)
+    workspace = Path(workspace_raw).resolve()
+    repo_root = Path(
+        str(
+            cfg.get("repo_root")
+            or "/workspace/skill_system_framework"
+        )
+    ).resolve()
+    target_branch = _normalize_ref(
+        cfg.get("delivery_target_branch") or "main"
+    )
+
+    try:
+        from hermes_cli import kanban_db_connect as kbc
+
+        with kbc.connect_closing(board=board) as conn:
+            cp, _cp_comment_id = _latest_checkpoint(
+                conn,
+                root_id,
+            )
+            if cp is None:
+                return _ORIGINAL_LOCAL_MAIN_DELIVERY_FINALIZE_V2(
+                    args,
+                    **kwargs,
+                )
+
+            root_branch = _normalize_ref(
+                cp.get("_root_branch")
+            )
+            main_worktree = _worktree_for_branch(
+                repo_root,
+                target_branch,
+                timeout,
+            )
+            if main_worktree is None:
+                return _err(
+                    "no local worktree found for delivery target "
+                    f"branch {target_branch}"
+                )
+
+            idem = _delivery_idempotent_v2(
+                cp,
+                workspace,
+                main_worktree,
+                target_branch,
+                timeout,
+            )
+            if idem is not None:
+                _audit({
+                    "event": "finalize",
+                    "root_task_id": root_id,
+                    "result": "idempotent",
+                    **idem,
+                })
+                return _ok(
+                    root_task_id=root_id,
+                    root_integration_branch=root_branch,
+                    delivery_target_branch=target_branch,
+                    main_integration_pending=False,
+                    main_integrated=True,
+                    push_performed=False,
+                    **idem,
+                )
+
+            recovered = _recover_partial_delivery_v2(
+                conn,
+                root_id=root_id,
+                cp=cp,
+                root_branch=root_branch,
+                root_workspace=workspace,
+                main_worktree=main_worktree,
+                target_branch=target_branch,
+                timeout=timeout,
+            )
+            if recovered is not None:
+                _audit({
+                    "event": "finalize",
+                    "root_task_id": root_id,
+                    "result": "recovered_partial_success",
+                    **recovered,
+                })
+                return _ok(
+                    root_task_id=root_id,
+                    root_integration_branch=root_branch,
+                    delivery_target_branch=target_branch,
+                    main_integration_pending=False,
+                    main_integrated=True,
+                    push_performed=False,
+                    **recovered,
+                )
+    except Exception as exc:
+        _audit({
+            "event": "finalize_preflight_v2_error",
+            "root_task_id": root_id,
+            "error": f"{type(exc).__name__}: {exc}"[:2000],
+        })
+        return _err(
+            f"{type(exc).__name__}: {exc}"[:2000],
+            human_required=True,
+        )
+
+    return _ORIGINAL_LOCAL_MAIN_DELIVERY_FINALIZE_V2(
+        args,
+        **kwargs,
     )

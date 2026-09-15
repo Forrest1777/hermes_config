@@ -27,7 +27,8 @@ provider_circuit:
 provider_recovery:
   enabled: true
   retry_interval_minutes: 20
-  max_automatic_retries: 12
+  # 0 = unlimited operational retries; provider outages never exhaust task budget.
+  max_automatic_retries: 0
   prefer_provider_reset_time: false
   authorization_ttl_minutes: 60
   one_probe_per_provider_per_dispatch_tick: true

@@ -1,5 +1,5 @@
 name: thin-orchestrator
-version: 1.0.0
+version: 1.0.1
 description: Read-only compact Kanban/checkpoint/Git state snapshot for low-overhead implementation orchestration.
 provides_tools:
   - orchestrator_compact_state

@@ -1,5 +1,5 @@
 name: worktree-guardian
-version: 1.4.2
+version: 1.4.3
 description: Atomic worktree provisioning from the root integration head, integrity verification, safe retry, conservative stale index.lock recovery, and post-root cleanup of locally integrated child worktrees.
 provides_tools:
   - worktree_guardian_prepare

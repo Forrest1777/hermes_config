@@ -611,7 +611,8 @@ Este bloco prevalece sobre qualquer regra historica conflitante deste profile.
 - Provider/rate-limit failures are operational availability failures, not semantic protocol failures for retry policy.
 - When provider recovery places a card in PROVIDER_WAIT, do not manually spam retries. The dispatcher authorizes one retry attempt after the configured interval; repeated provider failures return to PROVIDER_WAIT without a retry limit.
 - After human architecture approval, the orchestrator materializes ORCHESTRATOR_MATERIALIZATION with all canonical fields and reactivates the architect deterministically. Missing operational metadata must be filled by the orchestrator, not requested from the user again.
-- For stale Git index locks, use only worktree_guardian_recover_index_lock; never grant unrestricted m and never remove a lock that may belong to an active Git process.
+- For stale Git index locks, use only worktree_guardian_recover_index_lock; never grant unrestricted 
+m and never remove a lock that may belong to an active Git process.
 - Toolset validation must tolerate plugin toolsets before plugin discovery by maintaining known_plugin_toolsets; plugin discovery still remains the runtime authority.
 <!-- HERMES_RECOVERY_HARDENING_2026_09_13:END -->
 
@@ -662,3 +663,17 @@ Este bloco prevalece sobre rotinas historicas de bootstrap/retomada mais custosa
 - Nao gere relatorios repetidos no meio da fase.
 - Use `event_driven.parked_events`, `event_driven.collected_events`, retries/resumptions, tool calls e volume de tokens para identificar overhead operacional.
 <!-- HERMES_THIN_ORCHESTRATOR_TODO4_2026_09_13:END -->
+
+<!-- HERMES_ORCHESTRATOR_GUT_CURRENT_RUN_BINDING_2026_09_14:BEGIN -->
+## GUT operational resume â€” current-run binding
+
+Este bloco prevalece sobre qualquer orientaÃ§Ã£o anterior que mande selecionar
+`GWRM_GUT_TERMINAL_EVENT` apenas por "Ãºltimo comentÃ¡rio".
+
+- ApÃ³s uma retomada event-driven, a operaÃ§Ã£o GUT vÃ¡lida deve estar vinculada Ã  run atual pela governanÃ§a.
+- Quando `worktree_guardian_verify` for aplicÃ¡vel, use somente o `operational_resume_operation_id` retornado pelo Guardian.
+- `gwrm_gut_collect_event_result` deve ser chamado somente para o operation_id ligado Ã  run atual.
+- Nunca escolha um terminal antigo apenas por ser o comentÃ¡rio GWRM mais recente do card.
+- `STALE_OPERATION_FOR_CURRENT_RUN` e `OPERATION_NOT_BOUND_TO_CURRENT_RUN` sÃ£o falhas operacionais de correlaÃ§Ã£o; nÃ£o faÃ§a polling nem reaproveite outro terminal.
+- `GUT_RESULT_UNVERIFIED` nunca Ã© assertion failure e nunca Ã© cache reutilizÃ¡vel.
+<!-- HERMES_ORCHESTRATOR_GUT_CURRENT_RUN_BINDING_2026_09_14:END -->

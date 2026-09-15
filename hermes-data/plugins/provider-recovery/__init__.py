@@ -506,7 +506,9 @@ def _tick(board=None, dry_run=False, **kwargs):
         return True
     try:
         from hermes_cli import kanban_db as kb
-        with kb.connect_closing(board=board) as conn:
+        from hermes_cli import kanban_db_connect as kbc
+        # HERMES_KANBAN_CONNECT_CLOSING_MIGRATION_2026_09_14
+        with kbc.connect_closing(board=board) as conn:
             _process_conn(kb, conn)
         return True
     except Exception as exc:

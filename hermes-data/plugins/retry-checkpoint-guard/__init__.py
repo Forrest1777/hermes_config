@@ -160,6 +160,53 @@ def _authorized_recovery(task_id: str, workspace: Path, status: dict[str, Any]) 
 
 
 
+# HERMES_PROVIDER_WAIT_MANUAL_READY_GUARD_2026_09_14
+_PROVIDER_MANUAL_ALLOWED_PROFILES = {"implementation-worker", "implementation-architect", "implementation-orchestrator"}
+
+def _provider_wait_manual_resume_context(task_id: str, workspace: Path, status: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        state = json.loads(_governor_state_path().read_text(encoding="utf-8"))
+        task = (state.get("tasks") or {}).get(task_id) or {}
+        wait = task.get("provider_wait")
+        if not isinstance(wait, dict) or str(wait.get("state") or "") != "WAITING": return None
+        checkpoint = wait.get("checkpoint")
+        if not isinstance(checkpoint, dict) or not checkpoint.get("available"): return None
+        expected_workspace = str(Path(str(checkpoint.get("path") or "")).resolve(strict=False))
+        live_workspace = str(workspace.resolve(strict=False))
+        if not expected_workspace or expected_workspace != live_workspace: return None
+        if str(checkpoint.get("head") or "") != str(status.get("head") or ""): return None
+        if str(checkpoint.get("status_sha256") or "") != str(status.get("status_sha256") or ""): return None
+        return {"provider": str(wait.get("provider") or ""), "case_id": str(wait.get("case_id") or ""), "retry_count": int(task.get("provider_retry_count") or 0), "workspace": live_workspace, "head": str(status.get("head") or ""), "status_sha256": str(status.get("status_sha256") or ""), "state": "WAITING"}
+    except Exception: return None
+
+def _prepare_provider_manual_resume(conn, task_id: str) -> dict[str, Any] | None:
+    try:
+        row = conn.execute("SELECT * FROM tasks WHERE id=? LIMIT 1", (task_id,)).fetchone()
+        if row is None: return None
+        data = {key: row[key] for key in row.keys()}
+        if str(data.get("status") or "") != "ready": return None
+        if str(data.get("assignee") or "") not in _PROVIDER_MANUAL_ALLOWED_PROFILES: return None
+        if data.get("current_run_id") not in (None, "") or data.get("worker_pid") not in (None, ""): return None
+        raw_workspace = str(data.get("workspace_path") or "").strip()
+        if not raw_workspace: return None
+        workspace = Path(raw_workspace).resolve(strict=False)
+        if not workspace.is_dir(): return None
+        git = _git_status(workspace)
+        if not git.get("ok"): return None
+        context = _provider_wait_manual_resume_context(task_id, workspace, git)
+        if context is None: return None
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        assignments = []
+        if "block_kind" in cols: assignments.append("block_kind=NULL")
+        if "block_recurrences" in cols: assignments.append("block_recurrences=0")
+        if assignments:
+            conn.execute(f"UPDATE tasks SET {','.join(assignments)} WHERE id=? AND status='ready' AND current_run_id IS NULL", (task_id,))
+        _audit({"event": "provider_wait_manual_ready_prepared", "task_id": task_id, **context})
+        return context
+    except Exception as exc:
+        _audit({"event": "provider_wait_manual_ready_prepare_failed", "task_id": task_id, "error": f"{type(exc).__name__}: {exc}"[:1000]})
+        return None
+
 # HERMES_GWRM_OPERATIONAL_RESUME_RETRY_BYPASS_2026_09_14
 _GWRM_EVENT_STATE_DB = Path(
     "/opt/data/logs/gwrm-gut-event-runner/state-v1.sqlite3"
@@ -314,6 +361,11 @@ def _inspect_retry_checkpoint(
     if not entries:
         return None
 
+    provider_manual = _provider_wait_manual_resume_context(task_id, workspace, status)
+    if provider_manual is not None:
+        _audit({"event": "provider_wait_manual_ready_allowed", "task_id": task_id, "run_count": run_count, **provider_manual})
+        return None
+
     authorization = _authorized_recovery(task_id, workspace, status)
     if authorization is not None:
         return {
@@ -349,23 +401,15 @@ def _guarded_respawn(
     *args,
     **kwargs,
 ):
-    # Preserve every native Hermes guard first.
-    native_reason = _ORIGINAL_GUARD(
-        conn,
-        task_id,
-        *args,
-        **kwargs,
-    )
-
-    if native_reason is not None:
-        return native_reason
-
     lane = kwargs.get(
         "lane",
         "ready",
     )
-
-    # Review dispatch has different semantics.
+    if lane == "ready":
+        _prepare_provider_manual_resume(conn, task_id)
+    native_reason = _ORIGINAL_GUARD(conn, task_id, *args, **kwargs)
+    if native_reason is not None:
+        return native_reason
     if lane != "ready":
         return None
 
@@ -496,10 +540,12 @@ def _flush_pending(
     from hermes_cli import (
         kanban_db as kb,
     )
+    from hermes_cli import kanban_db_connect as kbc
 
+    # HERMES_KANBAN_CONNECT_CLOSING_MIGRATION_2026_09_14
     handled = []
 
-    with kb.connect_closing(
+    with kbc.connect_closing(
         board=board,
     ) as conn:
         for task_id in pending_ids:

@@ -275,8 +275,10 @@ def _reconcile_dispatcher(
 
     try:
         from hermes_cli import kanban_db as kb
+        from hermes_cli import kanban_db_connect as kbc
 
-        with kb.connect_closing(board=board) as conn:
+        # HERMES_KANBAN_CONNECT_CLOSING_MIGRATION_2026_09_14
+        with kbc.connect_closing(board=board) as conn:
             for record in candidates:
                 task_id = record.get("worktree_name")
 

@@ -19,7 +19,7 @@ from typing import Any, Callable, Optional
 import yaml
 
 NAME = "operational-sync"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 TOOLSET = "operational_sync"
 ALLOWED_PROFILES = {"implementation-orchestrator"}
 MARKER = "HERMES_OPERATIONAL_SYNC_2026_09_07"
@@ -1004,3 +1004,166 @@ def register(ctx: Any) -> None:
         check_fn=_available,
         emoji="🧾",
     )
+
+# HERMES_CANONICAL_CHECKPOINT_CONTRACT_V2_2026_09_14
+def _checkpoint_yaml_payload_v2(body: str) -> str:
+    text = str(body or "").strip()
+    lines = text.splitlines()
+    if lines and lines[0].startswith("OPERATIONAL_CHECKPOINT_CANONICAL"):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        text = "\n".join(lines).strip()
+
+    fenced = re.search(
+        r"```(?:yaml|yml)?\s*\r?\n(.*?)\r?\n```",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    return fenced.group(1).strip() if fenced else text
+
+
+def _extract_checkpoint_yaml(body: str) -> Optional[dict[str, Any]]:
+    text = str(body or "").strip()
+    if "operational_checkpoint" not in text.lower():
+        return None
+    try:
+        parsed = yaml.safe_load(_checkpoint_yaml_payload_v2(text))
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_checkpoint(parsed: dict[str, Any]) -> dict[str, Any]:
+    nested = parsed.get("operational_checkpoint")
+    nested = nested if isinstance(nested, dict) else {}
+
+    def pick(*keys: str, default=None):
+        for key in keys:
+            if key in parsed and parsed.get(key) is not None:
+                return parsed.get(key)
+            if key in nested and nested.get(key) is not None:
+                return nested.get(key)
+        return default
+
+    root_branch = pick(
+        "root_integration_branch",
+        "integration_target_branch",
+        default="",
+    )
+    delivery_target = pick(
+        "delivery_target_branch",
+        default="main",
+    )
+    delivery_state = pick("delivery_state", default={})
+    if not isinstance(delivery_state, dict):
+        delivery_state = {}
+
+    return {
+        "version": nested.get("version", parsed.get("version", 1)),
+        "phase_id": pick("phase_id"),
+        "status": pick("status"),
+        "root_integration_branch": root_branch,
+        "integration_target_branch": root_branch,
+        "delivery_target_branch": delivery_target,
+        "phase_base_commit": pick("phase_base_commit"),
+        "integration_head": pick("integration_head"),
+        "code_head": pick("code_head"),
+        "docs_head": pick("docs_head"),
+        "architecture_revision": pick("architecture_revision"),
+        "completion_gate": pick("completion_gate", default={}),
+        "integrated_cards": pick("integrated_cards", default=[]),
+        "pending_cards": pick("pending_cards", default=[]),
+        "next_expected_handoffs": pick(
+            "next_expected_handoffs",
+            default=[],
+        ),
+        "validated_sources": pick("validated_sources", default=[]),
+        "delivery_state": dict(delivery_state),
+        "raw": parsed,
+    }
+
+
+def _checkpoint_after_sync(
+    cp: dict[str, Any],
+    result: dict[str, Any],
+    gate_task_id: str,
+) -> dict[str, Any]:
+    gate = dict(cp.get("completion_gate") or {})
+    gate["documentation_synchronized"] = True
+    gate["operational_state_updated"] = True
+    gate["branch_clean"] = True
+    gate["push_performed"] = False
+
+    integrated = list(cp.get("integrated_cards") or [])
+    if gate_task_id not in {
+        str(item).split()[0] for item in integrated
+    }:
+        integrated.append(gate_task_id)
+
+    root_branch = _normalize_ref(
+        cp.get("root_integration_branch")
+        or cp.get("integration_target_branch")
+    )
+    delivery_target = _normalize_ref(
+        cp.get("delivery_target_branch") or "main"
+    )
+
+    prior_delivery = dict(cp.get("delivery_state") or {})
+    delivery_state = {
+        **prior_delivery,
+        "integration_branch_completed": True,
+        "integration_source_branch": root_branch,
+        "integration_source_head": result.get("docs_head"),
+        "delivery_target_branch": delivery_target,
+        "main_integration_pending": True,
+        "main_integrated": False,
+        "push_performed": False,
+    }
+
+    nested = {
+        "version": 2,
+        "phase_id": cp.get("phase_id"),
+        "status": "DELIVERING_LOCAL",
+        "root_integration_branch": root_branch,
+        "integration_target_branch": root_branch,
+        "delivery_target_branch": delivery_target,
+        "phase_base_commit": result.get("phase_base_commit"),
+        "integration_head": result.get("docs_head"),
+        "code_head": result.get("code_head"),
+        "docs_head": result.get("docs_head"),
+        "architecture_revision": result.get("architecture_revision"),
+        "integrated_cards": integrated,
+        "pending_cards": [],
+        "next_expected_handoffs": [],
+        "validated_sources": list(cp.get("validated_sources") or []),
+        "completion_gate": gate,
+        "delivery_state": delivery_state,
+        "documentation": {
+            "synchronized": True,
+            "evidence_artifact": result.get("evidence_artifact"),
+            "generated_from_code_head": result.get("code_head"),
+        },
+        "graphify": {
+            "required": bool(result.get("graphify_required")),
+            "synchronized": True,
+            "generated_from_code_head": result.get("code_head"),
+        },
+    }
+
+    return {
+        "phase_id": cp.get("phase_id"),
+        "status": "DELIVERING_LOCAL",
+        "root_integration_branch": root_branch,
+        "integration_target_branch": root_branch,
+        "delivery_target_branch": delivery_target,
+        "phase_base_commit": result.get("phase_base_commit"),
+        "architecture_revision": result.get("architecture_revision"),
+        "integration_head": result.get("docs_head"),
+        "code_head": result.get("code_head"),
+        "docs_head": result.get("docs_head"),
+        "completion_gate": gate,
+        "delivery_state": delivery_state,
+        "operational_checkpoint": nested,
+        "push_performed": False,
+    }

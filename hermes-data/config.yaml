@@ -205,6 +205,7 @@ platform_toolsets:
     - hermes-google_chat
 plugins:
   enabled:
+    - execution-governance
     - gwrm-preflight-guard
     - governance-guard
     - gwrm-lifecycle-cleanup
@@ -213,14 +214,18 @@ plugins:
     - post-ai-combat-hardening
     - rtk-rewrite
     - kanban-mode-guard
+  disabled:
     - provider-recovery
-  disabled: []
 image_gen:
   provider: openai-codex
   use_gateway: false
   model: gpt-image-2-high
 known_plugin_toolsets:
   cli:
+    - operational_sync
+    - local_main_delivery
+    - operational_cost_telemetry
+    - thin_orchestrator
     - gwrm_gut_event_runner
     - a2a
     - spotify
@@ -266,13 +271,3 @@ gwrm_preflight_guard:
   timeout_seconds: 2.0
   audit_interval_seconds: 60
 
-# HERMES_PROVIDER_RECOVERY_2026_09_13:BEGIN
-provider_recovery:
-  retry_interval_seconds: 1200
-  scan_limit: 300
-  evidence_limit: 40
-  allowed_profiles:
-    - implementation-orchestrator
-    - implementation-worker
-    - implementation-architect
-# HERMES_PROVIDER_RECOVERY_2026_09_13:END

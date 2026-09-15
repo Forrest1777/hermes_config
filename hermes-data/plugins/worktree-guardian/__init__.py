@@ -1966,3 +1966,128 @@ def register(ctx: Any) -> None:
         "kanban_task_completed",
         _lifecycle_on_task_completed,
     )
+
+# HERMES_WORKTREE_CANONICAL_CHECKPOINT_V2_2026_09_14
+def _extract_checkpoint_mapping(body: str) -> Optional[dict[str, Any]]:
+    raw = str(body or "").strip()
+    if "operational_checkpoint" not in raw.lower():
+        return None
+
+    lines = raw.splitlines()
+    if lines and lines[0].startswith("OPERATIONAL_CHECKPOINT_CANONICAL"):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        raw = "\n".join(lines).strip()
+
+    fenced = re.search(
+        r"```(?:yaml|yml)?\s*\r?\n(.*?)\r?\n```",
+        raw,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if fenced:
+        raw = fenced.group(1).strip()
+
+    parsed = None
+    try:
+        import yaml
+        parsed = yaml.safe_load(raw)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        nested = parsed.get("operational_checkpoint")
+        nested = nested if isinstance(nested, dict) else {}
+
+        def pick(*keys: str):
+            for key in keys:
+                if key in parsed and parsed.get(key) is not None:
+                    return parsed.get(key)
+                if key in nested and nested.get(key) is not None:
+                    return nested.get(key)
+            return None
+
+        root_branch = pick(
+            "root_integration_branch",
+            "integration_target_branch",
+        )
+        return {
+            "version": nested.get(
+                "version",
+                parsed.get("version", 1),
+            ),
+            "phase_id": pick("phase_id"),
+            "status": pick("status"),
+            "root_integration_branch": root_branch,
+            "integration_target_branch": root_branch,
+            "phase_base_commit": pick("phase_base_commit"),
+            "integration_head": pick("integration_head"),
+            "code_head": pick("code_head"),
+            "docs_head": pick("docs_head"),
+            "architecture_revision": pick("architecture_revision"),
+        }
+
+    cp: dict[str, Any] = {}
+    for key in (
+        "phase_id",
+        "status",
+        "root_integration_branch",
+        "integration_target_branch",
+        "phase_base_commit",
+        "integration_head",
+        "code_head",
+        "docs_head",
+        "architecture_revision",
+        "version",
+    ):
+        matches = re.findall(
+            rf"(?mi)^\s*{re.escape(key)}\s*:\s*([^#\r\n]+)",
+            raw,
+        )
+        if matches:
+            cp[key] = _strip_scalar(matches[-1])
+
+    root_branch = _strip_scalar(
+        cp.get("root_integration_branch")
+        or cp.get("integration_target_branch")
+    )
+    if root_branch:
+        cp["root_integration_branch"] = root_branch
+        cp["integration_target_branch"] = root_branch
+    return cp or None
+
+
+def _latest_operational_checkpoint(
+    conn: Any,
+    root_id: str,
+) -> tuple[Optional[dict[str, Any]], Optional[int]]:
+    rows = conn.execute(
+        "SELECT id, body FROM task_comments "
+        "WHERE task_id = ? ORDER BY id DESC LIMIT 160",
+        (root_id,),
+    ).fetchall()
+
+    for row in rows:
+        cp = _extract_checkpoint_mapping(
+            str(row["body"] or "")
+        )
+        if not isinstance(cp, dict):
+            continue
+
+        integration_head = _strip_scalar(
+            cp.get("integration_head")
+            or cp.get("code_head")
+        )
+        phase_id = _strip_scalar(cp.get("phase_id"))
+        root_branch = _strip_scalar(
+            cp.get("root_integration_branch")
+            or cp.get("integration_target_branch")
+        )
+
+        if integration_head and phase_id and root_branch:
+            cp["integration_head"] = integration_head
+            cp["root_integration_branch"] = root_branch
+            cp["integration_target_branch"] = root_branch
+            return cp, int(row["id"])
+
+    return None, None

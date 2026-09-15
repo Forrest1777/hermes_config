@@ -383,3 +383,132 @@ _delivery_guarded_complete._operational_block_original = getattr(
 )
 _guarded_complete = _delivery_guarded_complete
 # HERMES_CANONICAL_LOCAL_DELIVERY_2026_09_13:END
+
+# HERMES_DELIVERY_COMPLETION_GUARD_V2_2026_09_14
+def _delivery_checkpoint_state(conn, task_id):
+    rows = conn.execute(
+        "SELECT id, body FROM task_comments "
+        "WHERE task_id = ? ORDER BY id DESC LIMIT 160",
+        (task_id,),
+    ).fetchall()
+
+    saw_canonical = False
+    for row in rows:
+        body = str(row["body"] or "").strip()
+        if "OPERATIONAL_CHECKPOINT_CANONICAL" not in body:
+            continue
+        saw_canonical = True
+
+        lines = body.splitlines()
+        if (
+            lines
+            and lines[0].startswith(
+                "OPERATIONAL_CHECKPOINT_CANONICAL"
+            )
+        ):
+            lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines.pop(0)
+
+        payload = "\n".join(lines).strip()
+        fenced = re.search(
+            r"```(?:yaml|yml)?\s*\r?\n(.*?)\r?\n```",
+            payload,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if fenced:
+            payload = fenced.group(1).strip()
+
+        try:
+            parsed = _delivery_yaml.safe_load(payload)
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+
+        nested = parsed.get("operational_checkpoint")
+        nested = (
+            nested if isinstance(nested, dict) else {}
+        )
+
+        def pick(*keys, default=None):
+            for key in keys:
+                if key in parsed and parsed.get(key) is not None:
+                    return parsed.get(key)
+                if key in nested and nested.get(key) is not None:
+                    return nested.get(key)
+            return default
+
+        root_branch = str(
+            pick(
+                "root_integration_branch",
+                "integration_target_branch",
+                default="",
+            )
+            or ""
+        ).strip()
+        phase_id = str(
+            pick("phase_id", default="") or ""
+        ).strip()
+
+        delivery = pick(
+            "delivery_state",
+            default={},
+        )
+        delivery = (
+            dict(delivery)
+            if isinstance(delivery, dict)
+            else {}
+        )
+
+        target = str(
+            pick(
+                "delivery_target_branch",
+                default="",
+            )
+            or delivery.get("delivery_target_branch")
+            or ""
+        ).strip()
+
+        if not root_branch or not phase_id:
+            return {
+                "applicable": True,
+                "ready": False,
+                "parse_error": True,
+                "checkpoint_comment_id": int(row["id"]),
+                "reason": (
+                    "canonical checkpoint identity incomplete"
+                ),
+            }
+
+        ready = (
+            target == "main"
+            and delivery.get("main_integrated") is True
+            and delivery.get("main_integration_pending") is False
+            and delivery.get("push_performed") in (False, None)
+        )
+        return {
+            "applicable": True,
+            "ready": ready,
+            "checkpoint_comment_id": int(row["id"]),
+            "phase_id": phase_id,
+            "root_integration_branch": root_branch,
+            "delivery_target_branch": target,
+            "delivery_state": delivery,
+        }
+
+    if saw_canonical:
+        return {
+            "applicable": True,
+            "ready": False,
+            "parse_error": True,
+            "reason": (
+                "canonical checkpoint marker present "
+                "but unparseable"
+            ),
+        }
+
+    return {
+        "applicable": False,
+        "ready": False,
+    }
