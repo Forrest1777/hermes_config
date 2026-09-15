@@ -1,4 +1,4 @@
-"""Shared deterministic guard for execution-governor deployments.
+﻿"""Shared deterministic guard for execution-governor deployments.
 
 Designed against Hermes Agent v0.20.2 / v2026.8.16 public plugin hooks.
 
@@ -383,14 +383,14 @@ def _format_reset(ts: int | None) -> tuple[str | None, str]:
         local = datetime.fromtimestamp(int(ts), timezone.utc).astimezone(ZoneInfo(tz_name))
         offset = local.utcoffset()
         total_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
-        sign = "+" if total_minutes >= 0 else "−"
+        sign = "+" if total_minutes >= 0 else "âˆ’"
         total_minutes = abs(total_minutes)
         offset_text = f"UTC{sign}{total_minutes // 60:02d}:{total_minutes % 60:02d}"
-        label = "horário de Brasília" if tz_name == "America/Sao_Paulo" else tz_name
-        return f"{local.strftime('%d/%m/%Y às %H:%M:%S')} no {label} ({offset_text})", tz_name
+        label = "horÃ¡rio de BrasÃ­lia" if tz_name == "America/Sao_Paulo" else tz_name
+        return f"{local.strftime('%d/%m/%Y Ã s %H:%M:%S')} no {label} ({offset_text})", tz_name
     except Exception:
         local = datetime.fromtimestamp(int(ts), timezone.utc)
-        return local.strftime("%d/%m/%Y às %H:%M:%S UTC"), "UTC"
+        return local.strftime("%d/%m/%Y Ã s %H:%M:%S UTC"), "UTC"
 
 
 # HERMES_OPERATIONAL_HARDENING_2026_09_03: provider budget is a deferred retry state, not an immediate human gate.
@@ -934,6 +934,39 @@ def _hold_task(ctx, task_id: str, board: str | None, reason: str, kind: str) -> 
                 return {"ok": False, "error": "task_not_found", "board": effective_board}
             if str(task.status) == "blocked":
                 return {"ok": True, "method": "already_blocked", "board": effective_board}
+
+            # HERMES_PROVIDER_WAIT_BLOCK_RECURRENCE_EXEMPT_2026_09_15
+            # Provider quota/billing waits are operational deferrals, not
+            # repeated logical task blocks. Keep them outside Hermes'
+            # block-loop budget so unlimited provider retries remain unlimited.
+            if str(reason or "").startswith("PROVIDER_WAIT"):
+                try:
+                    with kb.write_txn(conn):
+                        cur = conn.execute(
+                            "UPDATE tasks SET block_recurrences=0 WHERE id=?",
+                            (task_id,),
+                        )
+                    if cur.rowcount != 1:
+                        return {
+                            "ok": False,
+                            "board": effective_board,
+                            "error": "provider_wait_block_recurrence_reset_refused",
+                        }
+                    _append_event(
+                        "provider_wait_block_recurrence_reset",
+                        task_id=task_id,
+                        board=effective_board,
+                    )
+                except Exception as exc:
+                    return {
+                        "ok": False,
+                        "board": effective_board,
+                        "error": (
+                            "provider_wait_block_recurrence_reset_failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )[:1000],
+                    }
+
             ok = kb.block_task(conn, task_id, reason=reason, kind=kind)
             return {"ok": bool(ok), "method": "kanban_db.block_task", "board": effective_board}
         finally:
@@ -4863,7 +4896,7 @@ def register(ctx):
         schema=DIRTY_RECOVERY_SCHEMA,
         handler=_request_dirty_checkpoint_recovery,
         check_fn=_dirty_recovery_tool_available,
-        emoji="🛡️",
+        emoji="ðŸ›¡ï¸",
     )
     ctx.register_tool(
         name="execute_exhausted_recovery_transaction",
@@ -4871,6 +4904,6 @@ def register(ctx):
         schema=EXHAUSTED_RECOVERY_SCHEMA,
         handler=_execute_exhausted_recovery_transaction,
         check_fn=_dirty_recovery_tool_available,
-        emoji="🛡️",
+        emoji="ðŸ›¡ï¸",
     )
     ctx.register_hook("pre_tool_call", _governor_tool_policy)

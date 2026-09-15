@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -405,11 +405,25 @@ def _guarded_respawn(
         "lane",
         "ready",
     )
+    # HERMES_PROVIDER_WAIT_NATIVE_BLOCKER_AUTH_BYPASS_2026_09_15
+    provider_manual = None
     if lane == "ready":
-        _prepare_provider_manual_resume(conn, task_id)
+        provider_manual = _prepare_provider_manual_resume(conn, task_id)
     native_reason = _ORIGINAL_GUARD(conn, task_id, *args, **kwargs)
     if native_reason is not None:
-        return native_reason
+        # A repeated PROVIDER_WAIT may leave Hermes' native block-loop
+        # authorization behind even after the card was deliberately returned
+        # to ready. Bypass ONLY that stale blocker when the canonical
+        # provider WAIT checkpoint was revalidated exactly above.
+        if provider_manual is not None and str(native_reason) == "blocker_auth":
+            _audit({
+                "event": "provider_wait_native_blocker_auth_bypassed",
+                "task_id": task_id,
+                "native_reason": str(native_reason),
+                **provider_manual,
+            })
+        else:
+            return native_reason
     if lane != "ready":
         return None
 
